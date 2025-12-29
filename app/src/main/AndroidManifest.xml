@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 联网权限：用于访问 LLM API -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 通知权限：用于发送前台通知（可选，你的 Service 代码中使用了 Toast，但也可能后续想发通知） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
+    <application
+        android:name=".MyApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.CalendarAssistant"
+
+        tools:targetApi="31">
+
+        <!--
+            MainActivity
+            关键配置：android:launchMode="singleTop"
+            作用：当 Service 发送 Intent 时，如果 App 已经在运行，不会创建新实例，
+            而是调用 onNewIntent()，防止页面闪烁或数据丢失。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.CalendarAssistant">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 无障碍服务 -->
+        <service
+            android:name=".service.TextAccessibilityService"
+            android:exported="true"
+            android:label="Calendar Assistant Service"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <!-- 必须在 res/xml 目录下创建 accessibility_service_config.xml 配置文件 -->
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- 下拉栏快捷开关 (Tile) -->
+        <service
+            android:name=".service.CaptureTileService"
+            android:icon="@drawable/ic_launcher_foreground"
+            android:label="识别日程"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <receiver android:name=".receiver.AlarmReceiver" />
+
+    </application>
+
+</manifest>
