@@ -1,4 +1,4 @@
-📅 智慧日程助手 (Smart Calendar Assistant)
+📅 自动日程助手
 
 ![alt text](https://img.shields.io/badge/Kotlin-2.0-purple.svg)
 
@@ -7,8 +7,10 @@
 ![alt text](https://img.shields.io/badge/OCR-Google%20ML%20Kit-blue.svg)
 
 ![alt text](https://img.shields.io/badge/License-MIT-orange.svg)
-智慧日程助手 是一款基于 Android 无障碍服务和 AI 大模型的智能日程管理应用。它能够通过屏幕截图自动识别当前界面（如微信、钉钉聊天记录）中的日程信息，利用本地 OCR 提取文字，结合 LLM（大语言模型）进行语义分析，并在后台静默创建日程和提醒。
+自动日程助手 是一款基于 Android 无障碍服务和 AI 大模型的智能日程管理应用。它能够通过屏幕截图自动识别当前界面（如微信、钉钉聊天记录）中的日程信息，利用本地 OCR 提取文字，结合 LLM（大语言模型）进行语义分析，并在后台静默创建日程和提醒。
 无需繁琐的复制粘贴，只需下拉通知栏点击一下，日程即刻生成。
+
+
 ✨ 核心功能
 
 👆 一键识别：通过系统快捷设置磁贴（Quick Settings Tile），在任意界面下拉即可触发识别。
@@ -24,6 +26,7 @@
 🎨 现代 UI 设计：完全基于 Jetpack Compose 开发，采用 Material 3 设计规范，包含丝滑的滚轮选择器动画。
 
 📂 数据备份：支持将日程数据导出为 JSON 文件或从文件导入，方便迁移。
+
 
 🚀 快速开始
 
@@ -45,6 +48,7 @@ API Key：填入你的密钥
 打开任意包含日程信息的界面（如聊天窗口）。
 下拉通知栏，点击 “识别日程”。
 等待顶部弹出“成功创建日程”的通知即可。
+
 
 🛠️ 技术栈
 
