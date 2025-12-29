@@ -7,6 +7,7 @@
 ![alt text](https://img.shields.io/badge/OCR-Google%20ML%20Kit-blue.svg)
 
 ![alt text](https://img.shields.io/badge/License-MIT-orange.svg)
+
 自动日程助手 是一款基于 Android 无障碍服务和 AI 大模型的智能日程管理应用。它能够通过屏幕截图自动识别当前界面（如微信、钉钉聊天记录）中的日程信息，利用本地 OCR 提取文字，结合 LLM（大语言模型）进行语义分析，并在后台静默创建日程和提醒。
 无需繁琐的复制粘贴，只需下拉通知栏点击一下，日程即刻生成。
 
