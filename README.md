@@ -1,4 +1,4 @@
-📅 自动日程助手
+ <big>📅 自动日程助手 </big>
 
 ![alt text](https://img.shields.io/badge/Kotlin-2.0-purple.svg)
 
@@ -11,7 +11,7 @@
 无需繁琐的复制粘贴，只需下拉通知栏点击一下，日程即刻生成。
 
 
-✨ 核心功能
+<big>✨ 核心功能 </big>
 
 👆 一键识别：通过系统快捷设置磁贴（Quick Settings Tile），在任意界面下拉即可触发识别。
 
@@ -27,8 +27,7 @@
 
 📂 数据备份：支持将日程数据导出为 JSON 文件或从文件导入，方便迁移。
 
-
-🚀 快速开始
+<big>🚀 快速开始 </big>
 
 1. 安装
 下载最新版本的 Releases APK 并安装到 Android 设备（推荐 Android 11+）。
@@ -50,7 +49,7 @@ API Key：填入你的密钥
 等待顶部弹出“成功创建日程”的通知即可。
 
 
-🛠️ 技术栈
+ <big>🛠️ 技术栈 </big>
 
 语言: Kotlin
 
