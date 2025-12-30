@@ -71,36 +71,27 @@ class TextAccessibilityService : AccessibilityService() {
     private fun processScreenshot(result: ScreenshotResult) {
         serviceScope.launch(Dispatchers.IO) {
             try {
-                // 1. 获取硬件位图
                 val hardwareBuffer = result.hardwareBuffer
                 val colorSpace = result.colorSpace
                 val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
 
-                if (bitmap == null) {
-                    Log.e(TAG, "Bitmap 为空")
-                    return@launch
-                }
+                if (bitmap == null) return@launch
 
-                // 2. 转换为软件位图 (关键：ML Kit 和 文件保存 都需要这个)
-                // copy(Config, isMutable) -> 必须转为 ARGB_8888 才能被 ML Kit 稳定识别
-                val softwareBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-
-                // 记得回收硬件位图
-                bitmap.recycle()
-                hardwareBuffer.close()
-
-                // 3. 保存文件 (用于 UI 显示)
                 val imagesDir = File(filesDir, "event_screenshots")
                 if (!imagesDir.exists()) imagesDir.mkdirs()
                 val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
                 val imageFile = File(imagesDir, "IMG_$timestamp.jpg")
 
+                // 必须转换位图格式供 ML Kit 使用
+                val softwareBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+                bitmap.recycle()
+                hardwareBuffer.close()
+
                 FileOutputStream(imageFile).use { out ->
                     softwareBitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
                 }
-                Log.d(TAG, "截图已保存: ${imageFile.absolutePath}")
+                Log.d(TAG, "截图保存: ${imageFile.absolutePath}")
 
-                // 4. 检查配置
                 val settings = MyApplication.getInstance().getSettings()
                 if (settings.modelKey.isBlank() || settings.modelUrl.isBlank()) {
                     withContext(Dispatchers.Main) {
@@ -109,17 +100,13 @@ class TextAccessibilityService : AccessibilityService() {
                     return@launch
                 }
 
-                // 5. AI 分析 (直接传入 Bitmap，不走文件读取)
-                // 【修改点】这里传入 softwareBitmap
                 val eventsList = RecognitionProcessor.analyzeImage(softwareBitmap)
-
-                // 分析完后回收 softwareBitmap
                 softwareBitmap.recycle()
 
-                val validEvents = eventsList.filter { it.hasEvent }
+                // 【关键修改】不再依赖 hasEvent 字段，只要标题不为空就认为是有效日程
+                val validEvents = eventsList.filter { it.title.isNotBlank() }
 
                 if (validEvents.isNotEmpty()) {
-                    // 后台保存
                     saveEventsLocally(validEvents, imageFile.absolutePath)
 
                     withContext(Dispatchers.Main) {
