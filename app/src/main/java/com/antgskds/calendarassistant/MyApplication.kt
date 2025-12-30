@@ -9,8 +9,10 @@ import com.antgskds.calendarassistant.model.MySettings
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.HttpTimeout // 【新增导入】
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
+import java.util.concurrent.TimeUnit
 
 class MyApplication : Application() {
 
@@ -20,6 +22,22 @@ class MyApplication : Application() {
 
     val ktorClient by lazy {
         HttpClient(OkHttp) {
+            // 【关键修改】使用 Ktor 标准的超时插件，确保设置生效
+            install(HttpTimeout) {
+                requestTimeoutMillis = 120_000 // 请求超时：2分钟
+                connectTimeoutMillis = 120_000 // 连接超时：2分钟
+                socketTimeoutMillis = 120_000  // Socket超时：2分钟
+            }
+
+            // 依然保留 Engine 配置作为双重保险
+            engine {
+                config {
+                    connectTimeout(120, TimeUnit.SECONDS)
+                    readTimeout(120, TimeUnit.SECONDS)
+                    writeTimeout(120, TimeUnit.SECONDS)
+                }
+            }
+
             install(ContentNegotiation) {
                 json(Json {
                     ignoreUnknownKeys = true
@@ -42,13 +60,11 @@ class MyApplication : Application() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val name = "日程助手重要通知"
             val descriptionText = "显示日程创建结果"
-
-            // 【关键修改】改为 HIGH，只有 HIGH 才会从屏幕顶部弹出
             val importance = NotificationManager.IMPORTANCE_HIGH
 
             val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
                 description = descriptionText
-                enableVibration(true) // 开启震动有助于触发弹出
+                enableVibration(true)
                 enableLights(true)
             }
             val notificationManager: NotificationManager =
@@ -58,8 +74,6 @@ class MyApplication : Application() {
     }
 
     companion object {
-        // 【关键修改】修改 ID 字符串，强制系统重新注册渠道设置
-        // 如果不改 ID，旧的“默认重要性”设置会一直保留，导致无法弹出
         const val CHANNEL_ID = "calendar_assistant_popup_channel_v2"
 
         @Volatile
