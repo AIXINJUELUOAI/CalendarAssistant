@@ -791,7 +791,7 @@ fun WheelPicker(items: List<String>, initialIndex: Int, modifier: Modifier = Mod
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismiss: () -> Unit, onConfirm: (MyEvent) -> Unit) {
     var title by remember { mutableStateOf(eventToEdit?.title ?: "") }
@@ -808,10 +808,8 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
         }
     }
 
-    // --- 新增：图片加载状态 ---
     var sourceBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
 
-    // --- 新增：异步加载图片逻辑 ---
     LaunchedEffect(eventToEdit) {
         val path = eventToEdit?.sourceImagePath
         if (!path.isNullOrBlank()) {
@@ -838,7 +836,6 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
         onDismissRequest = onDismiss,
         title = { Text(if (eventToEdit == null) "新增日程" else "编辑日程") },
         text = {
-            // --- 修改：添加 verticalScroll 允许内容滚动 ---
             Column(
                 modifier = Modifier
                     .heightIn(max = 450.dp)
@@ -847,7 +844,6 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
             ) {
                 OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("标题") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
 
-                // 时间选择
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("始", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     OutlinedButton(onClick = { showStartDatePicker = true }, modifier = Modifier.weight(1.5f), contentPadding = PaddingValues(horizontal = 8.dp)) { Text(startDate.toString(), fontSize = 13.sp) }
@@ -859,7 +855,6 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                     OutlinedButton(onClick = { showEndTimePicker = true }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 8.dp)) { Text(endTime, fontSize = 13.sp) }
                 }
 
-                // 添加提醒按钮
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -872,9 +867,7 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                     Text("添加提醒", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
                 }
 
-                // 提醒列表
                 if (reminders.isNotEmpty()) {
-                    OptIn(ExperimentalLayoutApi::class)
                     FlowRow(
                         modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -891,14 +884,12 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                     }
                 }
 
-                // 地点和备注
                 OutlinedTextField(value = location, onValueChange = { location = it }, label = { Text("地点") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 OutlinedTextField(value = desc, onValueChange = { desc = it }, label = { Text("备注") }, modifier = Modifier.fillMaxWidth(), maxLines = 3)
 
-                // --- 新增：显示来源图片 ---
                 if (sourceBitmap != null) {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    Text("日程来源", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    Text("日程来源 (滑动查看)", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                     Image(
                         bitmap = sourceBitmap!!.asImageBitmap(),
                         contentDescription = "Source Screenshot",
@@ -924,7 +915,7 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                         description = desc,
                         color = eventToEdit?.color ?: getNextColor(currentEventsCount),
                         isImportant = eventToEdit?.isImportant ?: false,
-                        sourceImagePath = eventToEdit?.sourceImagePath, // 保持原有图片路径
+                        sourceImagePath = eventToEdit?.sourceImagePath,
                         reminders = reminders.toList()
                     ))
                 }

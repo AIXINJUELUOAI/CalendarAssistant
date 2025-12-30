@@ -19,3 +19,19 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# --- Kotlin Serialization (防止 JSON 解析失败) ---
+-keepattributes *Annotation*, InnerClasses
+-dontnote kotlinx.serialization.SerializationKt
+-keep class kotlinx.serialization.** { *; }
+-keepclassmembers class kotlinx.serialization.** { *; }
+
+# --- Ktor (防止网络请求库崩溃) ---
+-keep class io.ktor.** { *; }
+-dontwarn io.ktor.**
+
+# --- 你的数据模型 (防止数据类被改名导致无法解析) ---
+-keep class com.antgskds.calendarassistant.model.** { *; }
+
+# --- Jetpack Compose ---
+-keep class androidx.compose.** { *; }
