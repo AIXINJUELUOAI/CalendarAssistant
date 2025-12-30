@@ -71,30 +71,36 @@ class TextAccessibilityService : AccessibilityService() {
     private fun processScreenshot(result: ScreenshotResult) {
         serviceScope.launch(Dispatchers.IO) {
             try {
-                // 1. 处理截图
+                // 1. 获取硬件位图
                 val hardwareBuffer = result.hardwareBuffer
                 val colorSpace = result.colorSpace
                 val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
 
-                if (bitmap == null) return@launch
+                if (bitmap == null) {
+                    Log.e(TAG, "Bitmap 为空")
+                    return@launch
+                }
 
+                // 2. 转换为软件位图 (关键：ML Kit 和 文件保存 都需要这个)
+                // copy(Config, isMutable) -> 必须转为 ARGB_8888 才能被 ML Kit 稳定识别
+                val softwareBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+
+                // 记得回收硬件位图
+                bitmap.recycle()
+                hardwareBuffer.close()
+
+                // 3. 保存文件 (用于 UI 显示)
                 val imagesDir = File(filesDir, "event_screenshots")
                 if (!imagesDir.exists()) imagesDir.mkdirs()
-
                 val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
                 val imageFile = File(imagesDir, "IMG_$timestamp.jpg")
 
                 FileOutputStream(imageFile).use { out ->
-                    val copy = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-                    copy.compress(Bitmap.CompressFormat.JPEG, 80, out)
-                    copy.recycle()
+                    softwareBitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
                 }
+                Log.d(TAG, "截图已保存: ${imageFile.absolutePath}")
 
-                bitmap.recycle()
-                hardwareBuffer.close()
-                Log.d(TAG, "截图保存: ${imageFile.absolutePath}")
-
-                // 2. 检查配置
+                // 4. 检查配置
                 val settings = MyApplication.getInstance().getSettings()
                 if (settings.modelKey.isBlank() || settings.modelUrl.isBlank()) {
                     withContext(Dispatchers.Main) {
@@ -103,17 +109,21 @@ class TextAccessibilityService : AccessibilityService() {
                     return@launch
                 }
 
-                // 3. AI 分析
-                val eventsList = RecognitionProcessor.analyzeImage(imageFile)
+                // 5. AI 分析 (直接传入 Bitmap，不走文件读取)
+                // 【修改点】这里传入 softwareBitmap
+                val eventsList = RecognitionProcessor.analyzeImage(softwareBitmap)
+
+                // 分析完后回收 softwareBitmap
+                softwareBitmap.recycle()
+
                 val validEvents = eventsList.filter { it.hasEvent }
 
                 if (validEvents.isNotEmpty()) {
-                    // 【关键修改】在后台直接保存数据，不再跳转 Activity
+                    // 后台保存
                     saveEventsLocally(validEvents, imageFile.absolutePath)
 
                     withContext(Dispatchers.Main) {
-                        val titles = validEvents.joinToString(separator = "\n") { it.title }
-                        // 发送成功通知，用户点击通知才会打开 App
+                        val titles = validEvents.joinToString(separator = "，") { it.title }
                         showNotification("成功创建日程", titles, isProgress = false, autoLaunch = false)
                     }
                 } else {
@@ -131,14 +141,10 @@ class TextAccessibilityService : AccessibilityService() {
         }
     }
 
-    // 【新增】后台保存逻辑
     private fun saveEventsLocally(aiEvents: List<CalendarEventData>, imagePath: String) {
         try {
             val eventStore = EventJsonStore(this)
-            // 1. 读取现有数据
             val currentEvents = eventStore.loadEvents()
-
-            // 2. 转换并追加新数据
             val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 
             aiEvents.forEach { aiEvent ->
@@ -159,15 +165,12 @@ class TextAccessibilityService : AccessibilityService() {
                     endTime = endDateTime.format(DateTimeFormatter.ofPattern("HH:mm")),
                     location = aiEvent.location,
                     description = aiEvent.description,
-                    color = getNextColor(currentEvents.size), // 获取颜色
+                    color = getNextColor(currentEvents.size),
                     sourceImagePath = imagePath
                 )
                 currentEvents.add(newEvent)
             }
-
-            // 3. 写入文件
             eventStore.saveEvents(currentEvents)
-            Log.d(TAG, "后台保存成功: ${aiEvents.size} 条日程")
 
         } catch (e: Exception) {
             Log.e(TAG, "后台保存失败", e)
@@ -177,7 +180,6 @@ class TextAccessibilityService : AccessibilityService() {
     private fun showNotification(title: String, content: String, isProgress: Boolean = false, autoLaunch: Boolean = false) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-        // 创建点击意图：点击通知打开 App
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -192,7 +194,7 @@ class TextAccessibilityService : AccessibilityService() {
             .setContentText(content)
             .setStyle(NotificationCompat.BigTextStyle().bigText(content))
             .setAutoCancel(true)
-            .setContentIntent(pendingIntent) // 设置点击跳转
+            .setContentIntent(pendingIntent)
 
         if (isProgress) {
             builder.setProgress(0, 0, true)
@@ -207,7 +209,6 @@ class TextAccessibilityService : AccessibilityService() {
 
         manager.notify(NOTIFICATION_ID_STATUS, builder.build())
 
-        // 如果需要自动跳转（例如配置缺失时），这里可以保留逻辑，但创建日程成功默认为 false
         if (autoLaunch) {
             startActivity(intent)
         }
