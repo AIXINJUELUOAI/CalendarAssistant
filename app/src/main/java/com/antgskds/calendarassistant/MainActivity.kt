@@ -28,6 +28,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -53,7 +55,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
-import com.antgskds.calendarassistant.model.CalendarEventData
 import com.antgskds.calendarassistant.service.TextAccessibilityService
 import com.antgskds.calendarassistant.util.NotificationScheduler
 import com.antgskds.calendarassistant.ui.theme.CalendarAssistantTheme
@@ -67,15 +68,11 @@ import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
-import kotlinx.serialization.json.Json
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
-import java.time.Instant
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.YearMonth
-import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.util.*
@@ -350,11 +347,6 @@ fun MainScreen(
         )
     }
 }
-
-// ... (TodayPageView, AllEventsPageView, SwipeableEventItem, ModelSettingsSidebar 保持不变) ...
-// 为了节省篇幅，这里未重复粘贴 TodayPageView, AllEventsPageView, SwipeableEventItem, ModelSettingsSidebar
-// 它们的逻辑没有变更，请务必保留这部分代码（从上一版复制即可）。
-// 如果需要，我可以再次提供。
 
 @Composable
 fun TodayPageView(
@@ -799,7 +791,6 @@ fun WheelPicker(items: List<String>, initialIndex: Int, modifier: Modifier = Mod
     }
 }
 
-// 【关键修改】ManualAddEventDialog：直接展示所有输入框
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismiss: () -> Unit, onConfirm: (MyEvent) -> Unit) {
@@ -817,6 +808,26 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
         }
     }
 
+    // --- 新增：图片加载状态 ---
+    var sourceBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+
+    // --- 新增：异步加载图片逻辑 ---
+    LaunchedEffect(eventToEdit) {
+        val path = eventToEdit?.sourceImagePath
+        if (!path.isNullOrBlank()) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val file = File(path)
+                    if (file.exists()) {
+                        sourceBitmap = BitmapFactory.decodeFile(file.absolutePath)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
     var showStartDatePicker by remember { mutableStateOf(false) }
     var showEndDatePicker by remember { mutableStateOf(false) }
     var showStartTimePicker by remember { mutableStateOf(false) }
@@ -827,7 +838,13 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
         onDismissRequest = onDismiss,
         title = { Text(if (eventToEdit == null) "新增日程" else "编辑日程") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // --- 修改：添加 verticalScroll 允许内容滚动 ---
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 450.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("标题") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
 
                 // 时间选择
@@ -874,9 +891,23 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                     }
                 }
 
-                // 地点和备注 (直接显示)
+                // 地点和备注
                 OutlinedTextField(value = location, onValueChange = { location = it }, label = { Text("地点") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 OutlinedTextField(value = desc, onValueChange = { desc = it }, label = { Text("备注") }, modifier = Modifier.fillMaxWidth(), maxLines = 3)
+
+                // --- 新增：显示来源图片 ---
+                if (sourceBitmap != null) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    Text("日程来源", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    Image(
+                        bitmap = sourceBitmap!!.asImageBitmap(),
+                        contentDescription = "Source Screenshot",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp)),
+                        contentScale = ContentScale.FillWidth
+                    )
+                }
             }
         },
         confirmButton = {
@@ -893,7 +924,7 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                         description = desc,
                         color = eventToEdit?.color ?: getNextColor(currentEventsCount),
                         isImportant = eventToEdit?.isImportant ?: false,
-                        sourceImagePath = eventToEdit?.sourceImagePath,
+                        sourceImagePath = eventToEdit?.sourceImagePath, // 保持原有图片路径
                         reminders = reminders.toList()
                     ))
                 }
