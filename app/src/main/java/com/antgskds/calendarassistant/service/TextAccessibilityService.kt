@@ -103,7 +103,7 @@ class TextAccessibilityService : AccessibilityService() {
                 val eventsList = RecognitionProcessor.analyzeImage(softwareBitmap)
                 softwareBitmap.recycle()
 
-                // 【关键修改】不再依赖 hasEvent 字段，只要标题不为空就认为是有效日程
+                // 只要标题不为空就认为是有效日程
                 val validEvents = eventsList.filter { it.title.isNotBlank() }
 
                 if (validEvents.isNotEmpty()) {
@@ -111,7 +111,7 @@ class TextAccessibilityService : AccessibilityService() {
 
                     withContext(Dispatchers.Main) {
                         val titles = validEvents.joinToString(separator = "，") { it.title }
-                        showNotification("成功创建日程", titles, isProgress = false, autoLaunch = false)
+                        showNotification("成功创建 ${validEvents.size} 条事项", titles, isProgress = false, autoLaunch = false)
                     }
                 } else {
                     withContext(Dispatchers.Main) {
@@ -143,6 +143,10 @@ class TextAccessibilityService : AccessibilityService() {
                     if (aiEvent.endTime.isNotBlank()) LocalDateTime.parse(aiEvent.endTime, formatter) else startDateTime.plusHours(1)
                 } catch (e: Exception) { startDateTime.plusHours(1) }
 
+                // 关键逻辑：根据 AI 返回的 type 决定 eventType
+                // 如果 type 是 pickup，则归类为 temp (临时事件)，否则为 event (日程)
+                val finalEventType = if (aiEvent.type == "pickup") "temp" else "event"
+
                 val newEvent = MyEvent(
                     id = UUID.randomUUID().toString(),
                     title = aiEvent.title,
@@ -153,7 +157,8 @@ class TextAccessibilityService : AccessibilityService() {
                     location = aiEvent.location,
                     description = aiEvent.description,
                     color = getNextColor(currentEvents.size),
-                    sourceImagePath = imagePath
+                    sourceImagePath = imagePath,
+                    eventType = finalEventType // 新增字段赋值
                 )
                 currentEvents.add(newEvent)
             }
