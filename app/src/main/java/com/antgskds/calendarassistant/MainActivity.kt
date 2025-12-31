@@ -309,7 +309,7 @@ fun MainScreen(
                     modifier = Modifier.fillMaxSize()
                 ) { targetTab ->
                     when (targetTab) {
-                        0 -> TodayPageView(events, revealedEventId, { revealedEventId = it }, {
+                        0 -> TodayPageView(events.filter { it.eventType == "event" }, revealedEventId, { revealedEventId = it }, {
                             NotificationScheduler.cancelReminders(context, it)
                             events.remove(it)
                             onDataChanged()
@@ -501,12 +501,44 @@ fun TodayPageView(
 
 @Composable
 fun AllEventsPageView(events: List<MyEvent>, revealedId: String?, onRevealStateChange: (String?) -> Unit, onDelete: (MyEvent) -> Unit, onImportant: (MyEvent) -> Unit, onEdit: (MyEvent) -> Unit) {
-    val sortedEvents = events.sortedByDescending { it.startDate }
-    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(sortedEvents, key = { it.id }) { event ->
-            Column(modifier = Modifier.padding(horizontal = 20.dp)) {
-                Text(text = "${event.startDate} ~ ${event.endDate}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(bottom = 4.dp, top = 8.dp))
-                SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
+    // 0: 日程事件, 1: 临时事件
+    var selectedCategory by remember { mutableIntStateOf(0) }
+
+    // 【核心修复】：去掉 remember，确保列表数据变化（删除/修改）时，filteredEvents 重新计算，界面立即刷新。
+    val filteredEvents = events.filter { event ->
+        if (selectedCategory == 0) event.eventType == "event"
+        else event.eventType != "event" // temp
+    }.sortedByDescending { it.startDate }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        TabRow(selectedTabIndex = selectedCategory) {
+            Tab(selected = selectedCategory == 0, onClick = { selectedCategory = 0 }, text = { Text("日程事件") })
+            Tab(selected = selectedCategory == 1, onClick = { selectedCategory = 1 }, text = { Text("临时事件 (取件/取餐)") })
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 80.dp, top = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (filteredEvents.isEmpty()) {
+                item {
+                    Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
+                        Text("暂无记录", color = Color.Gray)
+                    }
+                }
+            }
+
+            items(filteredEvents, key = { it.id }) { event ->
+                Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                    if (selectedCategory == 0) {
+                        Text(text = "${event.startDate} ~ ${event.endDate}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(bottom = 4.dp, top = 8.dp))
+                    } else {
+                        // 临时事件显示简单日期
+                        Text(text = "创建于: ${event.startDate}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary, modifier = Modifier.padding(bottom = 4.dp, top = 8.dp))
+                    }
+                    SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
+                }
             }
         }
     }
@@ -604,7 +636,12 @@ fun SwipeableEventItem(
                             Text(event.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             if (event.isImportant) Icon(Icons.Default.Star, null, Modifier.size(16.dp).padding(start = 4.dp), tint = Color(0xFFFFC107))
                         }
-                        Text(text = "${event.startTime} - ${event.endTime}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                        // 临时事件可能更关注 Description (即取件码)
+                        if (event.eventType == "temp" && event.description.isNotBlank()) {
+                            Text(text = "号码: ${event.description}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
+                        } else {
+                            Text(text = "${event.startTime} - ${event.endTime}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                        }
                         if (event.location.isNotBlank()) Text("📍 ${event.location}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }
                 }
@@ -801,6 +838,7 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
     var endTime by remember { mutableStateOf(eventToEdit?.endTime ?: "10:00") }
     var location by remember { mutableStateOf(eventToEdit?.location ?: "") }
     var desc by remember { mutableStateOf(eventToEdit?.description ?: "") }
+    var eventType by remember { mutableStateOf(eventToEdit?.eventType ?: "event") } // 默认为普通日程
 
     val reminders = remember {
         mutableStateListOf<Int>().apply {
@@ -842,6 +880,15 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // 类型选择 (简单实现)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("类型:", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.width(8.dp))
+                    FilterChip(selected = eventType == "event", onClick = { eventType = "event" }, label = { Text("日程") })
+                    Spacer(Modifier.width(8.dp))
+                    FilterChip(selected = eventType == "temp", onClick = { eventType = "temp" }, label = { Text("取件/取餐") })
+                }
+
                 OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("标题") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
 
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -885,7 +932,7 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                 }
 
                 OutlinedTextField(value = location, onValueChange = { location = it }, label = { Text("地点") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                OutlinedTextField(value = desc, onValueChange = { desc = it }, label = { Text("备注") }, modifier = Modifier.fillMaxWidth(), maxLines = 3)
+                OutlinedTextField(value = desc, onValueChange = { desc = it }, label = { Text(if (eventType == "temp") "取件码/取餐码" else "备注") }, modifier = Modifier.fillMaxWidth(), maxLines = 3)
 
                 if (sourceBitmap != null) {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -916,7 +963,8 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                         color = eventToEdit?.color ?: getNextColor(currentEventsCount),
                         isImportant = eventToEdit?.isImportant ?: false,
                         sourceImagePath = eventToEdit?.sourceImagePath,
-                        reminders = reminders.toList()
+                        reminders = reminders.toList(),
+                        eventType = eventType
                     ))
                 }
             }) { Text("确定") }
@@ -991,5 +1039,7 @@ data class MyEvent(
     val color: Color,
     val isImportant: Boolean = false,
     val sourceImagePath: String? = null,
-    val reminders: List<Int> = emptyList()
+    val reminders: List<Int> = emptyList(),
+    // --- 新增: 默认为 "event" (兼容旧数据) ---
+    val eventType: String = "event"
 )
