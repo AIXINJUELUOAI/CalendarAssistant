@@ -2,21 +2,20 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    kotlin("plugin.serialization") version "1.9.20" // 确保版本与你的 Kotlin 版本兼容
+    kotlin("plugin.serialization") version "1.9.20"
 }
 
 android {
     namespace = "com.antgskds.calendarassistant"
-    compileSdk {
-        version = release(36)
-    }
+    // 必须是 36 或 "android-baklava"
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.antgskds.calendarassistant"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -44,7 +43,10 @@ android {
 }
 
 dependencies {
-    implementation(libs.androidx.core.ktx)
+    // 尝试使用最新的 core-ktx，如果报错找不到 alpha 版本，可以使用 stable 版本
+    // 但因为 compileSdk=36，我们主要依赖 Framework API
+    implementation("androidx.core:core-ktx:1.15.0-alpha01")
+
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
@@ -52,15 +54,10 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
-    testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
-    androidTestImplementation(platform(libs.androidx.compose.bom))
-    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
-    debugImplementation(libs.androidx.compose.ui.tooling)
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
+
     implementation("androidx.compose.material:material-icons-extended")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
+
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.okhttp)
     implementation(libs.ktor.client.content.negotiation)
