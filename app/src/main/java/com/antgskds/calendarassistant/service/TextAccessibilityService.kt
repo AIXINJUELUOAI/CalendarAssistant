@@ -80,7 +80,7 @@ class TextAccessibilityService : AccessibilityService() {
                 val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
 
                 if (bitmap == null) {
-                    cancelStatusNotification() // 失败也要取消进度条
+                    cancelStatusNotification()
                     return@launch
                 }
 
@@ -128,19 +128,19 @@ class TextAccessibilityService : AccessibilityService() {
                         saveEventsLocally(pickupEvents, imageFile.absolutePath)
 
                         val pickup = pickupEvents.first()
+                        // 如果 Prompt 正常工作，description 会很短，走 if 分支
                         val chipText = if (pickup.description.length in 1..10) pickup.description
                         else pickup.title.take(6)
+                        
                         val title = pickup.title
                         val content = "位置: ${pickup.location} | 号码: ${pickup.description}"
 
                         withContext(Dispatchers.Main) {
-                            // 【修复2】发送胶囊前，先取消“正在分析”的进度条通知
                             cancelStatusNotification()
                             postLiveUpdateSafely(chipText, title, content)
                         }
                     } else {
-                        // 如果只有普通日程没有取件码，也要把普通日程的通知 ID 覆盖掉状态通知
-                        // (上面的 showNotification 用的 ID 是 NOTIFICATION_ID_STATUS，已经自动覆盖了)
+                        // 仅有普通日程时，不需要做额外操作，notify 会覆盖 ID
                     }
 
                 } else {
@@ -158,7 +158,6 @@ class TextAccessibilityService : AccessibilityService() {
         }
     }
 
-    // 取消“正在分析”的通知
     private fun cancelStatusNotification() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.cancel(NOTIFICATION_ID_STATUS)
@@ -167,7 +166,7 @@ class TextAccessibilityService : AccessibilityService() {
     private fun postLiveUpdateSafely(critText: String, title: String, content: String) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-        // 1. Android 16+ 权限检查
+        // Android 16+ 权限检查
         if (Build.VERSION.SDK_INT >= 36) {
             if (!manager.canPostPromotedNotifications()) {
                 sendPermissionGuidanceNotification()
@@ -183,24 +182,21 @@ class TextAccessibilityService : AccessibilityService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // 动态颜色计算
         val capsuleColor = if (isMealEvent(title)) Color.parseColor("#FFD600") // 黄
         else if (isPackageEvent(title)) Color.parseColor("#2196F3") // 蓝
         else Color.parseColor("#00C853") // 绿
 
-        // 【修复1】分支策略
-        // 如果是 Android 16+ (原生胶囊)，必须去掉 setColorized(true)，否则无法“上岛”
+        // 适配分支：Android 16 原生 vs 兼容模式
         if (Build.VERSION.SDK_INT >= 36) {
             postNativeBaklavaNotification(manager, critText, title, content, pendingIntent, capsuleColor)
         } else {
-            // 如果是 三星/旧版本，必须保留 setColorized(true) 才能触发灵动岛
             postCompatSamsungNotification(manager, title, content, pendingIntent, capsuleColor)
         }
     }
 
     /**
      * 针对 Android 16 (Baklava) 的原生路径
-     * 特点：无 Colorized，反射调用 Live Update API
+     * 反射调用 setShortCriticalText 和 setRequestPromotedOngoing
      */
     private fun postNativeBaklavaNotification(
         manager: NotificationManager,
@@ -218,15 +214,13 @@ class TextAccessibilityService : AccessibilityService() {
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .setStyle(Notification.BigTextStyle().bigText(content))
-                // 注意：Android 16 规范禁止 setCustomContentView 和 setColorized(true)
-                // 但允许 setColor，系统可能会用它来渲染胶囊的图标或文字颜色
+                // Android 16 禁止 setColorized(true)，但允许 setColor
                 .setColor(color)
 
-            // 反射调用 setShortCriticalText
+            // 反射调用 Android 16 新 API
             val methodSetText = Notification.Builder::class.java.getMethod("setShortCriticalText", String::class.java)
             methodSetText.invoke(builder, critText)
 
-            // 反射调用 setRequestPromotedOngoing
             val methodSetPromoted = Notification.Builder::class.java.getMethod("setRequestPromotedOngoing", Boolean::class.java)
             methodSetPromoted.invoke(builder, true)
 
@@ -235,14 +229,14 @@ class TextAccessibilityService : AccessibilityService() {
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to post native Baklava notification", e)
-            // 失败则降级
+            // 降级处理
             postCompatSamsungNotification(manager, title, content, pendingIntent, color)
         }
     }
 
     /**
      * 针对 三星 One UI / 旧 Android 的兼容路径
-     * 特点：启用 Colorized(true) 以触发三星灵动岛
+     * 必须启用 Colorized(true)
      */
     private fun postCompatSamsungNotification(
         manager: NotificationManager,
@@ -258,7 +252,6 @@ class TextAccessibilityService : AccessibilityService() {
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setStyle(NotificationCompat.BigTextStyle().bigText(content))
-            // 三星灵动岛的核心：必须着色
             .setColor(color)
             .setColorized(true)
 
