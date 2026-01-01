@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.provider.AlarmClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.widget.Toast
@@ -102,6 +103,38 @@ fun getLunarDate(date: LocalDate): String {
         "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十"
     )
     return "${monthNames.getOrElse(month - 1) { "" }}月${dayNames.getOrElse(day - 1) { "" }}"
+}
+
+// 辅助：创建系统闹钟 (修复日期 Bug)
+fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, date: LocalDate) {
+    try {
+        val parts = timeStr.split(":")
+        val hour = parts.getOrElse(0) { "09" }.toInt()
+        val minute = parts.getOrElse(1) { "00" }.toInt()
+
+        val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+            putExtra(AlarmClock.EXTRA_MESSAGE, title)
+            putExtra(AlarmClock.EXTRA_HOUR, hour)
+            putExtra(AlarmClock.EXTRA_MINUTES, minute)
+            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+
+            // 【核心修复】如果日期不是今天，强制指定星期几
+            if (date != LocalDate.now()) {
+                val dayOfWeek = date.dayOfWeek.value
+                val calendarDay = when (dayOfWeek) {
+                    7 -> java.util.Calendar.SUNDAY // 7 -> 1
+                    else -> dayOfWeek + 1          // 1 -> 2, etc.
+                }
+                putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(calendarDay))
+            }
+
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        context.startActivity(intent)
+        Toast.makeText(context, "已请求设置闹钟", Toast.LENGTH_SHORT).show()
+    } catch (e: Exception) {
+        Toast.makeText(context, "设置闹钟失败: ${e.message}", Toast.LENGTH_SHORT).show()
+    }
 }
 
 // --- Activity 主入口 ---
@@ -252,20 +285,31 @@ fun MainScreen(
                 Spacer(Modifier.height(48.dp))
                 Text("设置", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.headlineSmall)
                 HorizontalDivider()
-                Box(Modifier.padding(16.dp)) { ModelSettingsSidebar(snackbarHostState) }
-                HorizontalDivider()
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("数据备份", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
-                    OutlinedButton(onClick = { exportEvents() }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("导出日程到下载目录")
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = { importLauncher.launch(arrayOf("application/json")) }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Upload, null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("从 JSON 文件导入")
+                Box(Modifier.padding(16.dp)) {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        ModelSettingsSidebar(snackbarHostState)
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+                        // 偏好设置
+                        Text("偏好设置", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
+                        PreferenceSettings(snackbarHostState)
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+                        Text("数据备份", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
+                        OutlinedButton(onClick = { exportEvents() }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("导出日程")
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = { importLauncher.launch(arrayOf("application/json")) }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.Upload, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("导入日程")
+                        }
+                        Spacer(Modifier.height(24.dp))
                     }
                 }
             }
@@ -339,6 +383,12 @@ fun MainScreen(
                     }
                 } else {
                     events.add(newEvent)
+                    // 手动创建日程，如果设置开启，自动创建系统闹钟
+                    val settings = MyApplication.getInstance().getSettings()
+                    if (settings.autoCreateAlarm && newEvent.eventType == "event") {
+                        // 【核心调用修复】传入 newEvent.startDate
+                        createSystemAlarmHelper(context, newEvent.title, newEvent.startTime, newEvent.startDate)
+                    }
                 }
                 onDataChanged()
                 showAddDialog = false
@@ -358,9 +408,20 @@ fun TodayPageView(
     onEdit: (MyEvent) -> Unit
 ) {
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
-    val currentEvents = events.filter { it.startDate <= selectedDate && it.endDate >= selectedDate }
     val context = LocalContext.current
     val isToday = selectedDate == LocalDate.now()
+    val settings = remember { MyApplication.getInstance().getSettings() }
+
+    val currentEvents = events.filter { it.startDate <= selectedDate && it.endDate >= selectedDate }
+
+    val showTomorrow = settings.showTomorrowEvents
+    val tomorrowEvents = if (isToday && showTomorrow) {
+        val tomorrow = LocalDate.now().plusDays(1)
+        events.filter { it.startDate == tomorrow }
+    } else {
+        emptyList()
+    }
+
     var serviceEnabled by remember { mutableStateOf(false) }
     var notificationEnabled by remember { mutableStateOf(true) }
 
@@ -490,9 +551,27 @@ fun TodayPageView(
         }
 
         if (currentEvents.isEmpty()) {
-            item { Text("📅 暂无日程", modifier = Modifier.padding(vertical = 40.dp), color = Color.LightGray) }
+            item { Text("暂无日程", modifier = Modifier.padding(vertical = 40.dp), color = Color.LightGray) }
         } else {
             items(currentEvents, key = { it.id }) { event ->
+                SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
+            }
+        }
+
+        if (tomorrowEvents.isNotEmpty()) {
+            item {
+                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(modifier = Modifier.size(6.dp).background(MaterialTheme.colorScheme.tertiary, CircleShape))
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = "明日安排",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+            }
+            items(tomorrowEvents, key = { it.id }) { event ->
                 SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
             }
         }
@@ -501,19 +580,16 @@ fun TodayPageView(
 
 @Composable
 fun AllEventsPageView(events: List<MyEvent>, revealedId: String?, onRevealStateChange: (String?) -> Unit, onDelete: (MyEvent) -> Unit, onImportant: (MyEvent) -> Unit, onEdit: (MyEvent) -> Unit) {
-    // 0: 日程事件, 1: 临时事件
     var selectedCategory by remember { mutableIntStateOf(0) }
-
-    // 【核心修复】：去掉 remember，确保列表数据变化（删除/修改）时，filteredEvents 重新计算，界面立即刷新。
     val filteredEvents = events.filter { event ->
         if (selectedCategory == 0) event.eventType == "event"
-        else event.eventType != "event" // temp
+        else event.eventType != "event"
     }.sortedByDescending { it.startDate }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = selectedCategory) {
             Tab(selected = selectedCategory == 0, onClick = { selectedCategory = 0 }, text = { Text("日程事件") })
-            Tab(selected = selectedCategory == 1, onClick = { selectedCategory = 1 }, text = { Text("临时事件 (取件/取餐)") })
+            Tab(selected = selectedCategory == 1, onClick = { selectedCategory = 1 }, text = { Text("临时事件") })
         }
 
         LazyColumn(
@@ -528,13 +604,11 @@ fun AllEventsPageView(events: List<MyEvent>, revealedId: String?, onRevealStateC
                     }
                 }
             }
-
             items(filteredEvents, key = { it.id }) { event ->
                 Column(modifier = Modifier.padding(horizontal = 20.dp)) {
                     if (selectedCategory == 0) {
                         Text(text = "${event.startDate} ~ ${event.endDate}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(bottom = 4.dp, top = 8.dp))
                     } else {
-                        // 临时事件显示简单日期
                         Text(text = "创建于: ${event.startDate}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary, modifier = Modifier.padding(bottom = 4.dp, top = 8.dp))
                     }
                     SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
@@ -636,13 +710,12 @@ fun SwipeableEventItem(
                             Text(event.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             if (event.isImportant) Icon(Icons.Default.Star, null, Modifier.size(16.dp).padding(start = 4.dp), tint = Color(0xFFFFC107))
                         }
-                        // 临时事件可能更关注 Description (即取件码)
                         if (event.eventType == "temp" && event.description.isNotBlank()) {
                             Text(text = "号码: ${event.description}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
                         } else {
                             Text(text = "${event.startTime} - ${event.endTime}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                         }
-                        if (event.location.isNotBlank()) Text("📍 ${event.location}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                        if (event.location.isNotBlank()) Text(text = event.location, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }
                 }
             }
@@ -655,44 +728,105 @@ fun SwipeActionIcon(icon: ImageVector, tint: Color, onClick: () -> Unit) {
     Box(modifier = Modifier.size(48.dp).padding(4.dp).clip(RoundedCornerShape(12.dp)).background(tint.copy(alpha = 0.15f)).clickable { onClick() }, contentAlignment = Alignment.Center) { Icon(icon, null, tint = tint) }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModelSettingsSidebar(snackbarHostState: SnackbarHostState) {
     val scope = rememberCoroutineScope()
     val settings = MyApplication.getInstance().getSettings()
 
+    val currentUrl = settings.modelUrl
+    val currentModel = settings.modelName
+
+    val initialProvider = when {
+        currentUrl.contains("deepseek") -> "DeepSeek"
+        currentUrl.contains("openai") -> "OpenAI"
+        currentUrl.contains("googleapis") -> "Gemini"
+        currentUrl.isBlank() && currentModel.isBlank() -> "DeepSeek"
+        else -> "Custom"
+    }
+
+    var selectedProvider by remember { mutableStateOf(initialProvider) }
+    var expanded by remember { mutableStateOf(false) }
+
     var modelUrl by remember { mutableStateOf(settings.modelUrl) }
     var modelName by remember { mutableStateOf(settings.modelName) }
     var modelKey by remember { mutableStateOf(settings.modelKey) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text("自定义 AI 配置", fontWeight = FontWeight.Bold)
+    val providers = listOf("DeepSeek", "OpenAI", "Gemini", "Custom")
 
-        OutlinedTextField(
-            value = modelUrl,
-            onValueChange = { modelUrl = it },
-            label = { Text("API 地址 (URL)") },
-            placeholder = { Text("https://api.deepseek.com/chat/completions") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-        Text("可使用 DeepSeek, OpenAI 或任何兼容 API", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+    LaunchedEffect(selectedProvider) {
+        when (selectedProvider) {
+            "DeepSeek" -> {
+                modelUrl = "https://api.deepseek.com/chat/completions"
+                modelName = "deepseek-chat"
+            }
+            "OpenAI" -> {
+                modelUrl = "https://api.openai.com/v1/chat/completions"
+                modelName = "gpt-4o-mini"
+            }
+            "Gemini" -> {
+                modelUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+                modelName = "gemini-1.5-flash"
+            }
+        }
+    }
 
-        OutlinedTextField(
-            value = modelName,
-            onValueChange = { modelName = it },
-            label = { Text("模型名称 (Model)") },
-            placeholder = { Text("deepseek-chat") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("AI 模型配置", fontWeight = FontWeight.Bold)
+
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = !expanded }
+        ) {
+            OutlinedTextField(
+                value = selectedProvider,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("服务提供商") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                modifier = Modifier.menuAnchor().fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                providers.forEach { item ->
+                    DropdownMenuItem(
+                        text = { Text(item) },
+                        onClick = {
+                            selectedProvider = item
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
 
         OutlinedTextField(
             value = modelKey,
             onValueChange = { modelKey = it },
             label = { Text("API Key") },
             modifier = Modifier.fillMaxWidth(),
-            singleLine = true
+            singleLine = true,
+            visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None
         )
+
+        if (selectedProvider == "Custom") {
+            OutlinedTextField(
+                value = modelUrl,
+                onValueChange = { modelUrl = it },
+                label = { Text("API 地址 (URL)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = modelName,
+                onValueChange = { modelName = it },
+                label = { Text("模型名称 (Model)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+        }
 
         Button(
             onClick = {
@@ -700,18 +834,63 @@ fun ModelSettingsSidebar(snackbarHostState: SnackbarHostState) {
                     settings.modelUrl = modelUrl.trim()
                     settings.modelName = modelName.trim()
                     settings.modelKey = modelKey.trim()
-                    snackbarHostState.showSnackbar("配置已保存")
+                    snackbarHostState.showSnackbar("AI 配置已保存")
                 }
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("保存配置")
+            Text("保存 AI 配置")
+        }
+    }
+}
+
+@Composable
+fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
+    val settings = MyApplication.getInstance().getSettings()
+    var autoAlarm by remember { mutableStateOf(settings.autoCreateAlarm) }
+    var showTomorrow by remember { mutableStateOf(settings.showTomorrowEvents) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("创建系统闹钟", style = MaterialTheme.typography.bodyLarge)
+                Text("创建日程后自动创建闹钟", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            }
+            Switch(
+                checked = autoAlarm,
+                onCheckedChange = {
+                    autoAlarm = it
+                    settings.autoCreateAlarm = it
+                }
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("主页显示明日日程", style = MaterialTheme.typography.bodyLarge)
+                Text("在今日日程列表底部预览", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            }
+            Switch(
+                checked = showTomorrow,
+                onCheckedChange = {
+                    showTomorrow = it
+                    settings.showTomorrowEvents = it
+                }
+            )
         }
     }
 }
 
 // -----------------------------------------------------------
-// 滚轮样式的日期/时间选择器
+// 滚轮样式的日期/时间选择器 (已补充完整)
 // -----------------------------------------------------------
 @Composable
 fun WheelDatePickerDialog(initialDate: LocalDate, onDismiss: () -> Unit, onConfirm: (LocalDate) -> Unit) {
@@ -744,9 +923,6 @@ fun WheelTimePickerDialog(initialTime: String, onDismiss: () -> Unit, onConfirm:
     )
 }
 
-// -----------------------------------------------------------
-// 提醒选择器滚轮弹窗
-// -----------------------------------------------------------
 @Composable
 fun WheelReminderPickerDialog(
     initialMinutes: Int,
@@ -838,16 +1014,9 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
     var endTime by remember { mutableStateOf(eventToEdit?.endTime ?: "10:00") }
     var location by remember { mutableStateOf(eventToEdit?.location ?: "") }
     var desc by remember { mutableStateOf(eventToEdit?.description ?: "") }
-    var eventType by remember { mutableStateOf(eventToEdit?.eventType ?: "event") } // 默认为普通日程
-
-    val reminders = remember {
-        mutableStateListOf<Int>().apply {
-            addAll(eventToEdit?.reminders ?: emptyList())
-        }
-    }
-
+    var eventType by remember { mutableStateOf(eventToEdit?.eventType ?: "event") }
+    val reminders = remember { mutableStateListOf<Int>().apply { addAll(eventToEdit?.reminders ?: emptyList()) } }
     var sourceBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
-
     LaunchedEffect(eventToEdit) {
         val path = eventToEdit?.sourceImagePath
         if (!path.isNullOrBlank()) {
@@ -857,13 +1026,10 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                     if (file.exists()) {
                         sourceBitmap = BitmapFactory.decodeFile(file.absolutePath)
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
         }
     }
-
     var showStartDatePicker by remember { mutableStateOf(false) }
     var showEndDatePicker by remember { mutableStateOf(false) }
     var showStartTimePicker by remember { mutableStateOf(false) }
@@ -880,7 +1046,6 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // 类型选择 (简单实现)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("类型:", style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.width(8.dp))
@@ -888,9 +1053,7 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                     Spacer(Modifier.width(8.dp))
                     FilterChip(selected = eventType == "temp", onClick = { eventType = "temp" }, label = { Text("取件/取餐") })
                 }
-
                 OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("标题") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("始", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     OutlinedButton(onClick = { showStartDatePicker = true }, modifier = Modifier.weight(1.5f), contentPadding = PaddingValues(horizontal = 8.dp)) { Text(startDate.toString(), fontSize = 13.sp) }
@@ -901,50 +1064,28 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
                     OutlinedButton(onClick = { showEndDatePicker = true }, modifier = Modifier.weight(1.5f), contentPadding = PaddingValues(horizontal = 8.dp)) { Text(endDate.toString(), fontSize = 13.sp) }
                     OutlinedButton(onClick = { showEndTimePicker = true }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 8.dp)) { Text(endTime, fontSize = 13.sp) }
                 }
-
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { showReminderPicker = true }
-                        .padding(vertical = 8.dp)
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { showReminderPicker = true }.padding(vertical = 8.dp)
                 ) {
                     Icon(Icons.Outlined.Notifications, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("添加提醒", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
                 }
-
                 if (reminders.isNotEmpty()) {
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                    FlowRow(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         reminders.forEach { mins ->
                             val label = NotificationScheduler.REMINDER_OPTIONS.find { it.first == mins }?.second ?: "${mins}分钟前"
-                            InputChip(
-                                selected = false,
-                                onClick = { reminders.remove(mins) },
-                                label = { Text(label) },
-                                trailingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) }
-                            )
+                            InputChip(selected = false, onClick = { reminders.remove(mins) }, label = { Text(label) }, trailingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) })
                         }
                     }
                 }
-
                 OutlinedTextField(value = location, onValueChange = { location = it }, label = { Text("地点") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 OutlinedTextField(value = desc, onValueChange = { desc = it }, label = { Text(if (eventType == "temp") "取件码/取餐码" else "备注") }, modifier = Modifier.fillMaxWidth(), maxLines = 3)
-
                 if (sourceBitmap != null) {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     Text("日程来源 (滑动查看)", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-                    Image(
-                        bitmap = sourceBitmap!!.asImageBitmap(),
-                        contentDescription = "Source Screenshot",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp)),
-                        contentScale = ContentScale.FillWidth
-                    )
+                    Image(bitmap = sourceBitmap!!.asImageBitmap(), contentDescription = "Source", modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.FillWidth)
                 }
             }
         },
@@ -974,31 +1115,16 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
         containerColor = MaterialTheme.colorScheme.surface,
         tonalElevation = 6.dp
     )
-
     if (showStartDatePicker) WheelDatePickerDialog(startDate, { showStartDatePicker = false }) { startDate = it; showStartDatePicker = false }
     if (showEndDatePicker) WheelDatePickerDialog(endDate, { showEndDatePicker = false }) { endDate = it; showEndDatePicker = false }
     if (showStartTimePicker) WheelTimePickerDialog(startTime, { showStartTimePicker = false }) { startTime = it; showStartTimePicker = false }
     if (showEndTimePicker) WheelTimePickerDialog(endTime, { showEndTimePicker = false }) { endTime = it; showEndTimePicker = false }
-
     if (showReminderPicker) {
-        WheelReminderPickerDialog(
-            initialMinutes = 30,
-            onDismiss = { showReminderPicker = false },
-            onConfirm = {
-                if (!reminders.contains(it)) {
-                    reminders.add(it)
-                    val sorted = reminders.sorted()
-                    reminders.clear()
-                    reminders.addAll(sorted)
-                }
-            }
-        )
+        WheelReminderPickerDialog(30, { showReminderPicker = false }) { if (!reminders.contains(it)) reminders.add(it) }
     }
 }
 
-// -----------------------------------------------------------
-// 辅助函数
-// -----------------------------------------------------------
+// ... (Utils like checkAccessibilityEnabled, serializers) ...
 fun checkAccessibilityEnabled(context: Context): Boolean {
     val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
     val enabledServices = am.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
@@ -1007,8 +1133,6 @@ fun checkAccessibilityEnabled(context: Context): Boolean {
                 it.resolveInfo.serviceInfo.name == TextAccessibilityService::class.java.name
     }
 }
-
-// --- 数据模型 ---
 
 object LocalDateSerializer : KSerializer<LocalDate> {
     private val formatter = DateTimeFormatter.ISO_LOCAL_DATE
@@ -1040,6 +1164,5 @@ data class MyEvent(
     val isImportant: Boolean = false,
     val sourceImagePath: String? = null,
     val reminders: List<Int> = emptyList(),
-    // --- 新增: 默认为 "event" (兼容旧数据) ---
     val eventType: String = "event"
 )

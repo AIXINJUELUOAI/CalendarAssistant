@@ -65,7 +65,7 @@ object RecognitionProcessor {
         val settings = context.getSettings()
         val modelName = settings.modelName.ifBlank { "deepseek-chat" }
 
-        // --- 1. 原有的日程提取 Prompt (保持不变) ---
+        // --- 1. 普通日程提取 Prompt ---
         val itemSchema = JSONObject().apply {
             put("title", "日程标题")
             put("startTime", "格式 yyyy-MM-dd HH:mm")
@@ -101,9 +101,8 @@ object RecognitionProcessor {
             }
         """.trimIndent()
 
-        // --- 2. 优化后的：取件码/取餐码提取 Prompt ---
-        // 【Issue 2 修复】：强调提取短号码、顶部大字号
-        // 【Issue 3 修复】：强调标题格式包含号码
+        // --- 2. 取件码/取餐码提取 Prompt (已修改) ---
+        // 修改了 title 的生成规则，禁止包含号码
         val codeSystemPrompt = """
             你是一个生活助手，专门从文本中提取【取件码】和【取餐码】。
             当前系统时间：$timeStr
@@ -127,9 +126,9 @@ object RecognitionProcessor {
             {
               "events": [
                  {
-                    "title": "格式必须为: '品牌/类型 + 号码' (例如: '丰巢取件 88-9022', '麦当劳取餐 35230', '取件码 1-6-3007')",
+                    "title": "格式必须为: '品牌/平台 + 动作' (例如: '丰巢取件', '麦当劳取餐', '菜鸟驿站包裹', '免喜生活取件')。注意：标题中**严禁**包含具体的取件码或取餐号！",
                     "description": "只填号码(可含字母和连字符)，严禁包含空格或'取件码'等前缀",
-                    "location": "如果有柜机位置或餐厅名则填入，否则留空",
+                    "location": "如果有柜机位置、具体的楼栋单元或餐厅名则填入，否则留空",
                     "type": "pickup",
                     "startTime": "${now.format(dtfTime)}",
                     "endTime": "${now.plusHours(1).format(dtfTime)}"
@@ -162,7 +161,6 @@ object RecognitionProcessor {
 
                 // 任务 B: 临时事件提取 (取件码/取餐码)
                 val codeJob = async {
-                    // 【Issue 4 修复】：增加 "包裹", "驿站", "领取" 关键词，确保快递短信能触发此任务
                     val keywords = listOf("取件", "取餐", "提货", "单号", "验证码", "取货", "餐号", "包裹", "驿站", "领取")
                     if (keywords.none { extractedText.contains(it) }) {
                         return@async emptyList<CalendarEventData>()
@@ -185,9 +183,7 @@ object RecognitionProcessor {
 
                 Log.d(TAG, "AI 结果汇总: 日程=${schedules.size}条, 码=${codes.size}条")
 
-                // 【逻辑优化】：如果识别出了取件码(临时事件)，通常意味着这是一张取件码截图。
-                // 此时忽略“日程任务”的结果，避免生成重复的、格式不理想的“去取快递”日程。
-                // 这样也解决了“被放到日程事件分类下”的问题，因为只会返回 type="pickup" 的事件。
+                // 如果识别出了取件码(临时事件)，优先返回临时事件，避免重复生成
                 if (codes.isNotEmpty()) {
                     codes
                 } else {
