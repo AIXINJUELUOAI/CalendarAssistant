@@ -8,12 +8,15 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.drawable.Icon
 import android.os.Build
+import android.os.Bundle
 import android.provider.AlarmClock
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
+import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import com.antgskds.calendarassistant.*
 import com.antgskds.calendarassistant.llm.RecognitionProcessor
@@ -34,6 +37,9 @@ class TextAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val NOTIFICATION_ID_STATUS = 1001
     private val NOTIFICATION_ID_LIVE = 2077
+
+    // 【生产环境配置】: 设为 false
+    private val TEST_FLYME_LOGIC = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
@@ -116,17 +122,24 @@ class TextAccessibilityService : AccessibilityService() {
                         saveEventsLocally(normalEvents, imageFile.absolutePath)
                         withContext(Dispatchers.Main) {
                             val titles = normalEvents.joinToString(separator = "，") { it.title }
-                            showNotification("成功创建 ${normalEvents.size} 条事项", titles, isProgress = false, autoLaunch = false)
+                            val titleText = if (settings.autoCreateAlarm) {
+                                "成功创建 ${normalEvents.size} 条事项和 ${normalEvents.size} 个闹钟"
+                            } else {
+                                "成功创建 ${normalEvents.size} 条事项"
+                            }
+                            showNotification(titleText, titles, isProgress = false, autoLaunch = false)
                         }
                     }
 
-                    // 2. 取件码 -> 胶囊通知
+                    // 2. 取件码 -> 实时通知
                     if (pickupEvents.isNotEmpty()) {
                         saveEventsLocally(pickupEvents, imageFile.absolutePath)
                         val pickup = pickupEvents.first()
+
                         val chipText = if (pickup.description.length in 1..10) pickup.description else pickup.title.take(6)
                         val title = pickup.title
                         val content = "位置: ${pickup.location} | 号码: ${pickup.description}"
+
                         withContext(Dispatchers.Main) {
                             cancelStatusNotification()
                             postLiveUpdateSafely(chipText, title, content)
@@ -157,7 +170,6 @@ class TextAccessibilityService : AccessibilityService() {
             val eventStore = EventJsonStore(this)
             val currentEvents = eventStore.loadEvents()
             val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
-
             val shouldAutoAlarm = settings.autoCreateAlarm
 
             aiEvents.forEach { aiEvent ->
@@ -186,9 +198,7 @@ class TextAccessibilityService : AccessibilityService() {
                 )
                 currentEvents.add(newEvent)
 
-                // 自动设置系统闹钟 (仅针对普通日程)
                 if (shouldAutoAlarm && finalEventType == "event") {
-                    // 【核心修复】传入 startDateTime.toLocalDate()
                     createSystemAlarm(aiEvent.title, startDateTime.hour, startDateTime.minute, startDateTime.toLocalDate())
                 }
             }
@@ -198,7 +208,6 @@ class TextAccessibilityService : AccessibilityService() {
         }
     }
 
-    // 【修复】日期闹钟逻辑
     private fun createSystemAlarm(title: String, hour: Int, minute: Int, date: java.time.LocalDate) {
         try {
             val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
@@ -207,7 +216,6 @@ class TextAccessibilityService : AccessibilityService() {
                 putExtra(AlarmClock.EXTRA_MINUTES, minute)
                 putExtra(AlarmClock.EXTRA_SKIP_UI, true)
 
-                // 如果不是今天，设置星期几
                 if (date != java.time.LocalDate.now()) {
                     val dayOfWeek = date.dayOfWeek.value
                     val calendarDay = when (dayOfWeek) {
@@ -216,11 +224,9 @@ class TextAccessibilityService : AccessibilityService() {
                     }
                     putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(calendarDay))
                 }
-
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
             startActivity(intent)
-            Log.d(TAG, "已发起闹钟设置请求: $title $hour:$minute")
         } catch (e: Exception) {
             Log.e(TAG, "无法设置闹钟", e)
         }
@@ -231,14 +237,19 @@ class TextAccessibilityService : AccessibilityService() {
         manager.cancel(NOTIFICATION_ID_STATUS)
     }
 
-    private fun postLiveUpdateSafely(critText: String, title: String, content: String) {
+    private fun isFlyme(): Boolean {
+        val displayId = Build.DISPLAY
+        val manufacturer = Build.MANUFACTURER
+        return manufacturer.contains("Meizu", ignoreCase = true) || displayId.contains("Flyme", ignoreCase = true)
+    }
+
+    /**
+     * 核心方法：安全地发送实况更新通知
+     * 【更新】：已移除 Android 12-15 的 CallStyle 伪装，只保留 Flyme 和 Android 16+ 原生
+     */
+    private fun postLiveUpdateSafely(chipText: String, title: String, content: String) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= 36) {
-            if (!manager.canPostPromotedNotifications()) {
-                sendPermissionGuidanceNotification()
-                return
-            }
-        }
+
         val tapIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -250,14 +261,83 @@ class TextAccessibilityService : AccessibilityService() {
         else if (isPackageEvent(title)) Color.parseColor("#2196F3")
         else Color.parseColor("#00C853")
 
-        if (Build.VERSION.SDK_INT >= 36) {
-            postNativeBaklavaNotification(manager, critText, title, content, pendingIntent, capsuleColor)
-        } else {
+        val isFlymeEnv = isFlyme()
+
+        // 1. 优先判断 Flyme
+        if (isFlymeEnv || TEST_FLYME_LOGIC) {
+            postFlymeLiveNotification(manager, chipText, title, content, pendingIntent, capsuleColor)
+        }
+        // 2. 判断 Android 16+ Native Promoted (Baklava)
+        else if (Build.VERSION.SDK_INT >= 36) {
+            if (!manager.canPostPromotedNotifications()) {
+                sendPermissionGuidanceNotification()
+                return
+            }
+            postNativeBaklavaNotification(manager, chipText, title, content, pendingIntent, capsuleColor)
+        }
+        // 3. 兜底 (普通通知)
+        else {
             postCompatSamsungNotification(manager, title, content, pendingIntent, capsuleColor)
         }
     }
 
-    // Android 16 (Baklava) Native
+    // --- Flyme 专属逻辑 ---
+    private fun postFlymeLiveNotification(
+        manager: NotificationManager,
+        chipText: String,
+        title: String,
+        content: String,
+        pendingIntent: PendingIntent,
+        color: Int
+    ) {
+        try {
+            val capsuleRemoteViews = RemoteViews(packageName, R.layout.live_notification_capsule)
+            capsuleRemoteViews.setTextViewText(R.id.capsule_content, chipText)
+
+            val capsuleBundle = Bundle().apply {
+                putInt("notification.live.capsuleStatus", 1)
+                putInt("notification.live.capsuleType", 5)
+                putString("notification.live.capsuleContent", chipText)
+                putParcelable("notification.live.capsuleIcon", Icon.createWithResource(this@TextAccessibilityService, R.drawable.ic_launcher_foreground))
+                putInt("notification.live.capsuleBgColor", color)
+                putInt("notification.live.capsuleContentColor", Color.WHITE)
+                putParcelable("notification.live.capsule.content.remote.view", capsuleRemoteViews)
+            }
+
+            val liveBundle = Bundle().apply {
+                putBoolean("is_live", true)
+                putInt("notification.live.operation", 0)
+                putInt("notification.live.type", 2)
+                putBundle("notification.live.capsule", capsuleBundle)
+            }
+
+            val contentRemoteViews = RemoteViews(packageName, R.layout.live_notification_content)
+            val currentTime = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+            contentRemoteViews.setTextViewText(R.id.tv_title, title)
+            contentRemoteViews.setTextViewText(R.id.tv_time, "更新于 $currentTime")
+            contentRemoteViews.setTextViewText(R.id.tv_content, content)
+
+            val notification = Notification.Builder(this, MyApplication.CHANNEL_ID_LIVE)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(title)
+                .setContentText(content)
+                .setContentIntent(pendingIntent)
+                .setShowWhen(true)
+                .setOngoing(true)
+                .setAutoCancel(false)
+                .setExtras(liveBundle)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setCustomContentView(contentRemoteViews)
+                .build()
+
+            manager.notify(NOTIFICATION_ID_LIVE, notification)
+        } catch (e: Exception) {
+            Log.e(TAG, "Flyme分支: 异常", e)
+            postCompatSamsungNotification(manager, title, content, pendingIntent, color)
+        }
+    }
+
+    // --- Android 16+ Native Promoted Logic ---
     private fun postNativeBaklavaNotification(
         manager: NotificationManager,
         critText: String,
@@ -267,8 +347,9 @@ class TextAccessibilityService : AccessibilityService() {
         color: Int
     ) {
         try {
+            val icon = android.graphics.drawable.Icon.createWithResource(this, R.mipmap.ic_launcher)
             val builder = Notification.Builder(this, MyApplication.CHANNEL_ID_LIVE)
-                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setSmallIcon(icon)
                 .setContentTitle(title)
                 .setContentText(content)
                 .setContentIntent(pendingIntent)
@@ -276,18 +357,21 @@ class TextAccessibilityService : AccessibilityService() {
                 .setStyle(Notification.BigTextStyle().bigText(content))
                 .setColor(color)
 
+            // 反射调用 setShortCriticalText 和 setRequestPromotedOngoing
             val methodSetText = Notification.Builder::class.java.getMethod("setShortCriticalText", String::class.java)
             methodSetText.invoke(builder, critText)
+
             val methodSetPromoted = Notification.Builder::class.java.getMethod("setRequestPromotedOngoing", Boolean::class.java)
             methodSetPromoted.invoke(builder, true)
 
             manager.notify(NOTIFICATION_ID_LIVE, builder.build())
         } catch (e: Exception) {
+            Log.e(TAG, "Android 16 Native分支: 异常", e)
             postCompatSamsungNotification(manager, title, content, pendingIntent, color)
         }
     }
 
-    // Compat / Samsung
+    // --- 兜底/兼容模式 ---
     private fun postCompatSamsungNotification(
         manager: NotificationManager,
         title: String,

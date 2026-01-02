@@ -18,7 +18,6 @@ class MySettings(context: Context) {
         get() = prefs.getString("model_url", "") ?: ""
         set(value) = prefs.edit().putString("model_url", value).apply()
 
-    // 保留 Provider 标识以便未来扩展
     var modelProvider: String
         get() = prefs.getString("model_provider", "") ?: ""
         set(value) = prefs.edit().putString("model_provider", value).apply()
@@ -30,8 +29,10 @@ class MySettings(context: Context) {
         get() = prefs.getBoolean("auto_create_alarm", false)
         set(value) = prefs.edit().putBoolean("auto_create_alarm", value).apply()
 
-    // 新增：主页是否显示明日日程
+    // 主页是否显示明日日程
     var showTomorrowEvents: Boolean
         get() = prefs.getBoolean("show_tomorrow_events", false)
         set(value) = prefs.edit().putBoolean("show_tomorrow_events", value).apply()
+
+    // [已移除] 开启胶囊通知 (实验性) - enableFakeCallStyle
 }
