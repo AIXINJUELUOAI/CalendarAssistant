@@ -849,7 +849,8 @@ fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
     val settings = MyApplication.getInstance().getSettings()
     var autoAlarm by remember { mutableStateOf(settings.autoCreateAlarm) }
     var showTomorrow by remember { mutableStateOf(settings.showTomorrowEvents) }
-    var enableCapsule by remember { mutableStateOf(settings.enableFakeCallStyle) }
+
+    // 【修改点】：删除了关于胶囊通知的开关变量和 UI
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -884,29 +885,6 @@ fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
                 onCheckedChange = {
                     showTomorrow = it
                     settings.showTomorrowEvents = it
-                }
-            )
-        }
-
-        // [新增] 胶囊通知开关及警告
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("开启胶囊通知 (实验性)", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    "在 Android 12-15 上使用通话样式模拟。\n副作用：可能导致音乐暂停、蓝牙音质下降。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-            Switch(
-                checked = enableCapsule,
-                onCheckedChange = {
-                    enableCapsule = it
-                    settings.enableFakeCallStyle = it
                 }
             )
         }
