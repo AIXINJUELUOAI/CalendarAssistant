@@ -73,6 +73,7 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
@@ -131,7 +132,7 @@ fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, da
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
         context.startActivity(intent)
-        Toast.makeText(context, "已请求设置闹钟", Toast.LENGTH_SHORT).show()
+        // Toast 已移除，避免与系统闹钟 Toast 重叠
     } catch (e: Exception) {
         Toast.makeText(context, "设置闹钟失败: ${e.message}", Toast.LENGTH_SHORT).show()
     }
@@ -386,7 +387,6 @@ fun MainScreen(
                     // 手动创建日程，如果设置开启，自动创建系统闹钟
                     val settings = MyApplication.getInstance().getSettings()
                     if (settings.autoCreateAlarm && newEvent.eventType == "event") {
-                        // 【核心调用修复】传入 newEvent.startDate
                         createSystemAlarmHelper(context, newEvent.title, newEvent.startTime, newEvent.startDate)
                     }
                 }
@@ -849,6 +849,7 @@ fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
     val settings = MyApplication.getInstance().getSettings()
     var autoAlarm by remember { mutableStateOf(settings.autoCreateAlarm) }
     var showTomorrow by remember { mutableStateOf(settings.showTomorrowEvents) }
+    var enableCapsule by remember { mutableStateOf(settings.enableFakeCallStyle) }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -886,11 +887,34 @@ fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
                 }
             )
         }
+
+        // [新增] 胶囊通知开关及警告
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("开启胶囊通知 (实验性)", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "在 Android 12-15 上使用通话样式模拟。\n副作用：可能导致音乐暂停、蓝牙音质下降。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            Switch(
+                checked = enableCapsule,
+                onCheckedChange = {
+                    enableCapsule = it
+                    settings.enableFakeCallStyle = it
+                }
+            )
+        }
     }
 }
 
 // -----------------------------------------------------------
-// 滚轮样式的日期/时间选择器 (已补充完整)
+// 滚轮样式的日期/时间选择器
 // -----------------------------------------------------------
 @Composable
 fun WheelDatePickerDialog(initialDate: LocalDate, onDismiss: () -> Unit, onConfirm: (LocalDate) -> Unit) {
@@ -1007,11 +1031,17 @@ fun WheelPicker(items: List<String>, initialIndex: Int, modifier: Modifier = Mod
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismiss: () -> Unit, onConfirm: (MyEvent) -> Unit) {
+    val now = LocalDateTime.now()
+    val defaultEnd = now.plusHours(1)
+    val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
     var title by remember { mutableStateOf(eventToEdit?.title ?: "") }
-    var startDate by remember { mutableStateOf(eventToEdit?.startDate ?: LocalDate.now()) }
-    var endDate by remember { mutableStateOf(eventToEdit?.endDate ?: LocalDate.now()) }
-    var startTime by remember { mutableStateOf(eventToEdit?.startTime ?: "09:00") }
-    var endTime by remember { mutableStateOf(eventToEdit?.endTime ?: "10:00") }
+
+    var startDate by remember { mutableStateOf(eventToEdit?.startDate ?: now.toLocalDate()) }
+    var endDate by remember { mutableStateOf(eventToEdit?.endDate ?: defaultEnd.toLocalDate()) }
+    var startTime by remember { mutableStateOf(eventToEdit?.startTime ?: now.format(timeFormatter)) }
+    var endTime by remember { mutableStateOf(eventToEdit?.endTime ?: defaultEnd.format(timeFormatter)) }
+
     var location by remember { mutableStateOf(eventToEdit?.location ?: "") }
     var desc by remember { mutableStateOf(eventToEdit?.description ?: "") }
     var eventType by remember { mutableStateOf(eventToEdit?.eventType ?: "event") }

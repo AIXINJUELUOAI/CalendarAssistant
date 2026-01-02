@@ -116,7 +116,14 @@ class TextAccessibilityService : AccessibilityService() {
                         saveEventsLocally(normalEvents, imageFile.absolutePath)
                         withContext(Dispatchers.Main) {
                             val titles = normalEvents.joinToString(separator = "，") { it.title }
-                            showNotification("成功创建 ${normalEvents.size} 条事项", titles, isProgress = false, autoLaunch = false)
+
+                            val titleText = if (settings.autoCreateAlarm) {
+                                "成功创建 ${normalEvents.size} 条事项和 ${normalEvents.size} 个闹钟"
+                            } else {
+                                "成功创建 ${normalEvents.size} 条事项"
+                            }
+
+                            showNotification(titleText, titles, isProgress = false, autoLaunch = false)
                         }
                     }
 
@@ -188,7 +195,6 @@ class TextAccessibilityService : AccessibilityService() {
 
                 // 自动设置系统闹钟 (仅针对普通日程)
                 if (shouldAutoAlarm && finalEventType == "event") {
-                    // 【核心修复】传入 startDateTime.toLocalDate()
                     createSystemAlarm(aiEvent.title, startDateTime.hour, startDateTime.minute, startDateTime.toLocalDate())
                 }
             }
@@ -198,7 +204,6 @@ class TextAccessibilityService : AccessibilityService() {
         }
     }
 
-    // 【修复】日期闹钟逻辑
     private fun createSystemAlarm(title: String, hour: Int, minute: Int, date: java.time.LocalDate) {
         try {
             val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
@@ -207,7 +212,6 @@ class TextAccessibilityService : AccessibilityService() {
                 putExtra(AlarmClock.EXTRA_MINUTES, minute)
                 putExtra(AlarmClock.EXTRA_SKIP_UI, true)
 
-                // 如果不是今天，设置星期几
                 if (date != java.time.LocalDate.now()) {
                     val dayOfWeek = date.dayOfWeek.value
                     val calendarDay = when (dayOfWeek) {
@@ -233,12 +237,19 @@ class TextAccessibilityService : AccessibilityService() {
 
     private fun postLiveUpdateSafely(critText: String, title: String, content: String) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        // 检查用户设置
+        val settings = MyApplication.getInstance().getSettings()
+        val useFakeCapsule = settings.enableFakeCallStyle
+
         if (Build.VERSION.SDK_INT >= 36) {
+            // Android 16+ 原生支持
             if (!manager.canPostPromotedNotifications()) {
                 sendPermissionGuidanceNotification()
                 return
             }
         }
+
         val tapIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -252,12 +263,57 @@ class TextAccessibilityService : AccessibilityService() {
 
         if (Build.VERSION.SDK_INT >= 36) {
             postNativeBaklavaNotification(manager, critText, title, content, pendingIntent, capsuleColor)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && useFakeCapsule) {
+            // Android 12 - 15，且用户开启了开关 -> 使用伪装通话
+            postFakeCallStyleNotification(manager, critText, title, content, pendingIntent, capsuleColor)
         } else {
+            // Android 11 或 用户未开启开关 -> 普通通知
             postCompatSamsungNotification(manager, title, content, pendingIntent, capsuleColor)
         }
     }
 
-    // Android 16 (Baklava) Native
+    // [修改] 伪装通话样式通知 (Android 12-15) - 使用 APP 图标
+    private fun postFakeCallStyleNotification(
+        manager: NotificationManager,
+        chipText: String,
+        title: String,
+        content: String,
+        pendingIntent: PendingIntent,
+        color: Int
+    ) {
+        // 使用 App 图标填充，避免空白
+        val icon = androidx.core.graphics.drawable.IconCompat.createWithResource(this, R.mipmap.ic_launcher)
+
+        val person = androidx.core.app.Person.Builder()
+            .setName(chipText)
+            .setIcon(icon) // 使用 App 图标
+            .setImportant(true)
+            .build()
+
+        val hangupIntent = PendingIntent.getBroadcast(
+            this, 0, Intent("DUMMY_HANG_UP"), PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val callStyle = NotificationCompat.CallStyle.forOngoingCall(
+            person,
+            pendingIntent
+        )
+
+        val builder = NotificationCompat.Builder(this, MyApplication.CHANNEL_ID_LIVE)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setStyle(callStyle)
+            .setContentTitle(title)
+            .setContentText(content)
+            .setColor(color)
+            .setColorized(true)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+
+        manager.notify(NOTIFICATION_ID_LIVE, builder.build())
+    }
+
+    // Android 16 (Baklava) Native - 使用 APP 图标
     private fun postNativeBaklavaNotification(
         manager: NotificationManager,
         critText: String,
@@ -267,8 +323,11 @@ class TextAccessibilityService : AccessibilityService() {
         color: Int
     ) {
         try {
+            // [核心修改] 使用 App 图标 (R.mipmap.ic_launcher)
+            val icon = android.graphics.drawable.Icon.createWithResource(this, R.mipmap.ic_launcher)
+
             val builder = Notification.Builder(this, MyApplication.CHANNEL_ID_LIVE)
-                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setSmallIcon(icon) // 设置图标，填充空白
                 .setContentTitle(title)
                 .setContentText(content)
                 .setContentIntent(pendingIntent)
