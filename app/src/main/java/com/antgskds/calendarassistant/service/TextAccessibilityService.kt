@@ -7,7 +7,11 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
@@ -18,6 +22,8 @@ import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import com.antgskds.calendarassistant.*
 import com.antgskds.calendarassistant.llm.RecognitionProcessor
 import com.antgskds.calendarassistant.model.CalendarEventData
@@ -38,7 +44,7 @@ class TextAccessibilityService : AccessibilityService() {
     private val NOTIFICATION_ID_STATUS = 1001
     private val NOTIFICATION_ID_LIVE = 2077
 
-    // 【生产环境配置】: 设为 false
+    // 【生产环境配置】: 设为 false，如果你想在非魅族手机测试魅族逻辑，可设为 true
     private val TEST_FLYME_LOGIC = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
@@ -136,9 +142,10 @@ class TextAccessibilityService : AccessibilityService() {
                         saveEventsLocally(pickupEvents, imageFile.absolutePath)
                         val pickup = pickupEvents.first()
 
-                        val chipText = if (pickup.description.length in 1..10) pickup.description else pickup.title.take(6)
+                        val chipText = pickup.description.trim() // 取件码
                         val title = pickup.title
-                        val content = "位置: ${pickup.location} | 号码: ${pickup.description}"
+                        val location = if (pickup.location.isNotBlank()) pickup.location else "暂无位置信息"
+                        val content = "位置: $location | 号码: $chipText"
 
                         withContext(Dispatchers.Main) {
                             cancelStatusNotification()
@@ -215,6 +222,7 @@ class TextAccessibilityService : AccessibilityService() {
                 putExtra(AlarmClock.EXTRA_HOUR, hour)
                 putExtra(AlarmClock.EXTRA_MINUTES, minute)
                 putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                putExtra(AlarmClock.EXTRA_VIBRATE, true)
 
                 if (date != java.time.LocalDate.now()) {
                     val dayOfWeek = date.dayOfWeek.value
@@ -243,10 +251,10 @@ class TextAccessibilityService : AccessibilityService() {
         return manufacturer.contains("Meizu", ignoreCase = true) || displayId.contains("Flyme", ignoreCase = true)
     }
 
-    /**
-     * 核心方法：安全地发送实况更新通知
-     * 【更新】：已移除 Android 12-15 的 CallStyle 伪装，只保留 Flyme 和 Android 16+ 原生
-     */
+    // ==========================================
+    // 核心实况通知逻辑
+    // ==========================================
+
     private fun postLiveUpdateSafely(chipText: String, title: String, content: String) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -257,13 +265,13 @@ class TextAccessibilityService : AccessibilityService() {
             this, 0, tapIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val capsuleColor = if (isMealEvent(title)) Color.parseColor("#FFD600")
-        else if (isPackageEvent(title)) Color.parseColor("#2196F3")
-        else Color.parseColor("#00C853")
+        val capsuleColor = if (isMealEvent(title)) Color.parseColor("#FFD600") // 黄色
+        else if (isPackageEvent(title)) Color.parseColor("#2196F3") // 蓝色
+        else Color.parseColor("#00C853") // 绿色
 
         val isFlymeEnv = isFlyme()
 
-        // 1. 优先判断 Flyme
+        // 1. 优先判断 Flyme (参考 StarSchedule)
         if (isFlymeEnv || TEST_FLYME_LOGIC) {
             postFlymeLiveNotification(manager, chipText, title, content, pendingIntent, capsuleColor)
         }
@@ -281,60 +289,99 @@ class TextAccessibilityService : AccessibilityService() {
         }
     }
 
-    // --- Flyme 专属逻辑 ---
+    // --- Flyme 专属逻辑 (修复版：参照 StarSchedule) ---
     private fun postFlymeLiveNotification(
         manager: NotificationManager,
-        chipText: String,
+        chipText: String, // 用于胶囊的简短文本 (如取件码)
         title: String,
         content: String,
         pendingIntent: PendingIntent,
         color: Int
     ) {
         try {
-            val capsuleRemoteViews = RemoteViews(packageName, R.layout.live_notification_capsule)
-            capsuleRemoteViews.setTextViewText(R.id.capsule_content, chipText)
+            // 1. 准备图标：Flyme 需要 Bitmap 且最好着色
+            // 使用 R.drawable.ic_qs_recognition (如果存在) 或默认图标
+            val iconDrawable = ContextCompat.getDrawable(this, R.drawable.ic_qs_recognition)
+                ?: ContextCompat.getDrawable(this, R.drawable.ic_launcher_foreground)
 
+            // 将图标转为白色 Bitmap 以适应彩色胶囊背景
+            val iconBitmap = iconDrawable?.mutate()?.let {
+                val bmp = it.toBitmap()
+                tintBitmap(bmp, Color.WHITE)
+            }
+            val iconObj = if (iconBitmap != null) Icon.createWithBitmap(iconBitmap) else null
+
+            // 2. 构建 Capsule Bundle (胶囊参数)
+            // notification.live.capsuleType = 3 (文本模式)
             val capsuleBundle = Bundle().apply {
-                putInt("notification.live.capsuleStatus", 1)
-                putInt("notification.live.capsuleType", 5)
-                putString("notification.live.capsuleContent", chipText)
-                putParcelable("notification.live.capsuleIcon", Icon.createWithResource(this@TextAccessibilityService, R.drawable.ic_launcher_foreground))
+                putInt("notification.live.capsuleStatus", 1) // 1=进行中
+                putInt("notification.live.capsuleType", 3)   // 3=文本模式
+                putString("notification.live.capsuleContent", chipText) // 胶囊显示的文字
+
+                if (iconObj != null) {
+                    putParcelable("notification.live.capsuleIcon", iconObj)
+                }
                 putInt("notification.live.capsuleBgColor", color)
                 putInt("notification.live.capsuleContentColor", Color.WHITE)
-                putParcelable("notification.live.capsule.content.remote.view", capsuleRemoteViews)
             }
 
+            // 3. 构建 Live Bundle (实况参数)
+            // notification.live.type = 10 (自定义视图模式)
             val liveBundle = Bundle().apply {
                 putBoolean("is_live", true)
-                putInt("notification.live.operation", 0)
-                putInt("notification.live.type", 2)
+                putInt("notification.live.operation", 0) // 0=创建/更新
+                putInt("notification.live.type", 10)     // 10=自定义 View
                 putBundle("notification.live.capsule", capsuleBundle)
+                putInt("notification.live.contentColor", Color.WHITE)
             }
 
-            val contentRemoteViews = RemoteViews(packageName, R.layout.live_notification_content)
-            val currentTime = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
-            contentRemoteViews.setTextViewText(R.id.tv_title, title)
-            contentRemoteViews.setTextViewText(R.id.tv_time, "更新于 $currentTime")
-            contentRemoteViews.setTextViewText(R.id.tv_content, content)
+            // 4. 构建自定义 Layout (Type 10 必须)
+            // 提取位置信息 (从 content 字符串中解析，或者简单处理)
+            val locationText = content.replace("位置: ", "").replace("| 号码: $chipText", "").trim()
+            val finalLocation = if (locationText.isBlank() || locationText == "暂无位置信息") title else locationText
 
-            val notification = Notification.Builder(this, MyApplication.CHANNEL_ID_LIVE)
+            val contentRemoteViews = RemoteViews(packageName, R.layout.notification_live_flyme).apply {
+                setTextViewText(R.id.live_title, title)
+                setTextViewText(R.id.live_content, chipText)
+                setTextViewText(R.id.live_location, finalLocation)
+                setTextViewText(R.id.live_time, "刚刚")
+
+                if (iconBitmap != null) {
+                    setImageViewBitmap(R.id.live_icon, iconBitmap)
+                }
+            }
+
+            // 5. 构建通知
+            val builder = Notification.Builder(this, MyApplication.CHANNEL_ID_LIVE)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle(title)
                 .setContentText(content)
                 .setContentIntent(pendingIntent)
-                .setShowWhen(true)
-                .setOngoing(true)
+                .setCustomContentView(contentRemoteViews)     // 关键：折叠视图
+                .setCustomBigContentView(contentRemoteViews)  // 关键：展开视图
+                .addExtras(liveBundle)                        // 关键：Flyme 参数
+                .setOngoing(true)                             // 关键：必须常驻
                 .setAutoCancel(false)
-                .setExtras(liveBundle)
-                .setVisibility(Notification.VISIBILITY_PUBLIC)
-                .setCustomContentView(contentRemoteViews)
-                .build()
+                .setCategory(Notification.CATEGORY_EVENT)
 
-            manager.notify(NOTIFICATION_ID_LIVE, notification)
+            manager.notify(NOTIFICATION_ID_LIVE, builder.build())
+            Log.d(TAG, "Flyme Live Notification Sent: $title")
+
         } catch (e: Exception) {
-            Log.e(TAG, "Flyme分支: 异常", e)
+            Log.e(TAG, "Flyme Live Notification Failed", e)
             postCompatSamsungNotification(manager, title, content, pendingIntent, color)
         }
+    }
+
+    // 辅助：Bitmap 着色
+    private fun tintBitmap(source: Bitmap, color: Int): Bitmap {
+        val bitmap = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val paint = Paint().apply {
+            colorFilter = PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN)
+        }
+        canvas.drawBitmap(source, 0f, 0f, paint)
+        return bitmap
     }
 
     // --- Android 16+ Native Promoted Logic ---

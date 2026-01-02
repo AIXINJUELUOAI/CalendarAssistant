@@ -9,8 +9,6 @@ import com.antgskds.calendarassistant.model.ModelRequest
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import org.json.JSONArray
@@ -65,7 +63,9 @@ object RecognitionProcessor {
         val settings = context.getSettings()
         val modelName = settings.modelName.ifBlank { "deepseek-chat" }
 
-        // --- 1. 普通日程提取 Prompt ---
+        // =================================================================================
+        // 原有 Prompt 1：普通日程提取 (完整保留，一字未删，保证日期逻辑稳定性)
+        // =================================================================================
         val itemSchema = JSONObject().apply {
             put("title", "日程标题")
             put("startTime", "格式 yyyy-MM-dd HH:mm")
@@ -75,7 +75,7 @@ object RecognitionProcessor {
             put("type", "固定填 'event'")
         }
 
-        val systemPrompt = """
+        val originalSchedulePrompt = """
             你是一个日程计算助手。
             【当前系统时间】：$timeStr
             
@@ -101,9 +101,10 @@ object RecognitionProcessor {
             }
         """.trimIndent()
 
-        // --- 2. 取件码/取餐码提取 Prompt (已修改) ---
-        // 修改了 title 的生成规则，禁止包含号码
-        val codeSystemPrompt = """
+        // =================================================================================
+        // 原有 Prompt 2：取件码提取 (完整保留，一字未删，保证防幻觉指令有效性)
+        // =================================================================================
+        val originalCodePrompt = """
             你是一个生活助手，专门从文本中提取【取件码】和【取餐码】。
             当前系统时间：$timeStr
             
@@ -126,7 +127,7 @@ object RecognitionProcessor {
             {
               "events": [
                  {
-                    "title": "格式必须为: '品牌/平台 + 动作' (例如: '丰巢取件', '麦当劳取餐', '菜鸟驿站包裹', '免喜生活取件')。注意：标题中**严禁**包含具体的取件码或取餐号！",
+                    "title": "格式必须为: '品牌/平台 + 动作' (例如: '丰巢取件', '麦当劳取餐', '菜鸟驿站包裹', '兔喜生活取件')。注意：标题中**严禁**包含具体的取件码或取餐号！",
                     "description": "只填号码(可含字母和连字符)，严禁包含空格或'取件码'等前缀",
                     "location": "如果有柜机位置、具体的楼栋单元或餐厅名则填入，否则留空",
                     "type": "pickup",
@@ -137,59 +138,59 @@ object RecognitionProcessor {
             }
         """.trimIndent()
 
+        // =================================================================================
+        // 核心修改：使用“强制锚定词”+“物理分隔”策略，融合以上两段 Prompt
+        // =================================================================================
+        val unifiedPrompt = """
+            【强制模式选择指令 - 先读此指令再处理】
+            你必须严格按以下规则选择处理模式，绝不允许混合、误判或参考非选中模式的内容：
+
+            1. 扫描OCR文本的全部内容，立即判断（优先级最高）：
+               - 如果文本包含这些核心锚定词中的任何一个：【取件、取餐、提货、验证码、快递单号、运单号、丰巢、菜鸟驿站、货架、取货码、取件码、取餐码】
+               - → 强制使用【模式B】，**完全跳过、不读取、不参考模式A的任何内容**
+               
+            2. 如果上述锚定词一个都没有：
+               - → 强制使用【模式A】，**完全跳过、不读取、不参考模式B的任何内容**
+
+            【重要】选择后，另一个模式的内容对你来说是无效文本，如同不存在！你仅能读取、执行选中模式的内容。
+
+            【当前系统时间】：$timeStr
+            （下面两个模式完整保留，你只看选中的那个）
+
+            ==================================================================================
+            如果选择【模式A】，只看以下内容：【执行边界：仅处理此部分，不回溯其他内容】
+            ==================================================================================
+            $originalSchedulePrompt
+
+            ==================================================================================
+            如果选择【模式B】，只看以下内容：【执行边界：仅处理此部分，不回溯其他内容】
+            ==================================================================================
+            $originalCodePrompt
+            【模式B补充】必须在JSON中添加"reasoning"字段，内容固定为："识别到取件/取餐/快递信息"
+            ==================================================================================
+
+            【最终输出】
+            根据你的选择，输出对应的纯JSON字符串，无任何额外文字、注释、换行或说明。
+        """.trimIndent()
+
         val userPrompt = """
             [OCR文本开始]
             $extractedText
             [OCR文本结束]
         """.trimIndent()
 
+        // --- 执行单次 AI 请求 ---
         return try {
-            coroutineScope {
-                // 任务 A: 原有日程提取
-                val scheduleJob = async {
-                    Log.d(TAG, "正在请求模型 (日程)...")
-                    val request = ModelRequest(
-                        model = modelName,
-                        temperature = 0.1,
-                        messages = listOf(
-                            ModelMessage("system", systemPrompt),
-                            ModelMessage("user", userPrompt)
-                        )
-                    )
-                    executeAiRequest(request, "日程任务")
-                }
-
-                // 任务 B: 临时事件提取 (取件码/取餐码)
-                val codeJob = async {
-                    val keywords = listOf("取件", "取餐", "提货", "单号", "验证码", "取货", "餐号", "包裹", "驿站", "领取")
-                    if (keywords.none { extractedText.contains(it) }) {
-                        return@async emptyList<CalendarEventData>()
-                    }
-
-                    Log.d(TAG, "正在请求模型 (取件码)...")
-                    val request = ModelRequest(
-                        model = modelName,
-                        temperature = 0.1,
-                        messages = listOf(
-                            ModelMessage("system", codeSystemPrompt),
-                            ModelMessage("user", userPrompt)
-                        )
-                    )
-                    executeAiRequest(request, "取件码任务")
-                }
-
-                val schedules = scheduleJob.await()
-                val codes = codeJob.await()
-
-                Log.d(TAG, "AI 结果汇总: 日程=${schedules.size}条, 码=${codes.size}条")
-
-                // 如果识别出了取件码(临时事件)，优先返回临时事件，避免重复生成
-                if (codes.isNotEmpty()) {
-                    codes
-                } else {
-                    schedules
-                }
-            }
+            Log.d(TAG, "正在请求 AI (合并模式)...")
+            val request = ModelRequest(
+                model = modelName,
+                temperature = 0.1, // 保持低温，确保严格遵循锚定词指令
+                messages = listOf(
+                    ModelMessage("system", unifiedPrompt),
+                    ModelMessage("user", userPrompt)
+                )
+            )
+            executeAiRequest(request, "智能分类任务")
         } catch (e: Exception) {
             Log.e(TAG, "AI 分析严重错误", e)
             emptyList()
@@ -205,11 +206,14 @@ object RecognitionProcessor {
             }
 
             var cleanJson = responseText.trim()
-            if (cleanJson.startsWith("```")) {
+            if (cleanJson.contains("```")) {
                 cleanJson = cleanJson.substringAfter("json").substringAfter("\n").substringBeforeLast("```")
             }
 
+            Log.d(TAG, "AI 原始响应: $cleanJson")
+
             val rootObject = JSONObject(cleanJson)
+            // 记录推理过程（如果模式B触发，这里会显示"识别到取件/取餐/快递信息"）
             if (rootObject.has("reasoning")) {
                 Log.d(TAG, "[$debugTag] 推理: ${rootObject.getString("reasoning")}")
             }

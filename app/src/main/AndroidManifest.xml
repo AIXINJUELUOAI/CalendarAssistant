@@ -13,6 +13,9 @@
     <!-- 新增：调用系统闹钟权限 -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
+    <!-- 【新增】魅族实况通知状态读取权限 (参考自 StarSchedule) -->
+    <uses-permission android:name="flyme.permission.READ_NOTIFICATION_LIVE_STATE" />
+
     <application
         android:name=".MyApplication"
         android:allowBackup="true"
@@ -24,6 +27,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.CalendarAssistant"
         tools:targetApi="31">
+
+        <!-- 【新增】告诉 Flyme 系统此应用支持实况通知 (必须添加) -->
+        <meta-data
+            android:name="com.meizu.flyme.live_notification"
+            android:value="true" />
 
         <activity
             android:name=".MainActivity"

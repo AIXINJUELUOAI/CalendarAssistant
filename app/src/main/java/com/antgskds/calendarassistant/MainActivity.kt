@@ -52,6 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -74,6 +75,7 @@ import java.io.File
 import java.io.InputStreamReader
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
@@ -106,7 +108,23 @@ fun getLunarDate(date: LocalDate): String {
     return "${monthNames.getOrElse(month - 1) { "" }}月${dayNames.getOrElse(day - 1) { "" }}"
 }
 
-// 辅助：创建系统闹钟 (修复日期 Bug)
+// 辅助：判断日程是否已过期
+fun isEventExpired(event: MyEvent): Boolean {
+    return try {
+        // 解析结束时间，如果时间字符串不规范，默认为当天的 23:59
+        val timeParts = event.endTime.split(":")
+        val hour = timeParts.getOrElse(0) { "23" }.toIntOrNull() ?: 23
+        val minute = timeParts.getOrElse(1) { "59" }.toIntOrNull() ?: 59
+
+        val endDateTime = LocalDateTime.of(event.endDate, LocalTime.of(hour, minute))
+        endDateTime.isBefore(LocalDateTime.now())
+    } catch (e: Exception) {
+        false
+    }
+}
+
+// 辅助：创建系统闹钟 (Flyme/国产ROM 适配版)
+// 使用 Intent 方式唤起系统闹钟，这是 Flyme 兼容性最好的方案（方案1）
 fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, date: LocalDate) {
     try {
         val parts = timeStr.split(":")
@@ -117,14 +135,19 @@ fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, da
             putExtra(AlarmClock.EXTRA_MESSAGE, title)
             putExtra(AlarmClock.EXTRA_HOUR, hour)
             putExtra(AlarmClock.EXTRA_MINUTES, minute)
+            // 跳过 UI 确认，直接设置（大多数国产 ROM 支持）
             putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            putExtra(AlarmClock.EXTRA_VIBRATE, true)
 
-            // 【核心修复】如果日期不是今天，强制指定星期几
+            // 【关键适配】如果日期不是今天，必须计算星期几
+            // AlarmClock API 不支持绝对日期，只支持 EXTRA_DAYS (ArrayList<Integer>)
+            // Java Calendar: Sunday=1, Monday=2 ... Saturday=7
+            // Java LocalDate: Monday=1 ... Sunday=7
             if (date != LocalDate.now()) {
-                val dayOfWeek = date.dayOfWeek.value
+                val dayOfWeek = date.dayOfWeek.value // 1-7
                 val calendarDay = when (dayOfWeek) {
                     7 -> java.util.Calendar.SUNDAY // 7 -> 1
-                    else -> dayOfWeek + 1          // 1 -> 2, etc.
+                    else -> dayOfWeek + 1          // 1 -> 2
                 }
                 putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(calendarDay))
             }
@@ -132,9 +155,8 @@ fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, da
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
         context.startActivity(intent)
-        // Toast 已移除，避免与系统闹钟 Toast 重叠
     } catch (e: Exception) {
-        Toast.makeText(context, "设置闹钟失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "无法设置闹钟: ${e.message}", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -384,7 +406,6 @@ fun MainScreen(
                     }
                 } else {
                     events.add(newEvent)
-                    // 手动创建日程，如果设置开启，自动创建系统闹钟
                     val settings = MyApplication.getInstance().getSettings()
                     if (settings.autoCreateAlarm && newEvent.eventType == "event") {
                         createSystemAlarmHelper(context, newEvent.title, newEvent.startTime, newEvent.startDate)
@@ -581,12 +602,42 @@ fun TodayPageView(
 @Composable
 fun AllEventsPageView(events: List<MyEvent>, revealedId: String?, onRevealStateChange: (String?) -> Unit, onDelete: (MyEvent) -> Unit, onImportant: (MyEvent) -> Unit, onEdit: (MyEvent) -> Unit) {
     var selectedCategory by remember { mutableIntStateOf(0) }
+    var searchQuery by remember { mutableStateOf("") }
+
     val filteredEvents = events.filter { event ->
-        if (selectedCategory == 0) event.eventType == "event"
-        else event.eventType != "event"
+        val categoryMatch = if (selectedCategory == 0) event.eventType == "event" else event.eventType != "event"
+        val searchMatch = if (searchQuery.isBlank()) true else {
+            event.title.contains(searchQuery, ignoreCase = true) ||
+                    event.description.contains(searchQuery, ignoreCase = true) ||
+                    event.location.contains(searchQuery, ignoreCase = true)
+        }
+        categoryMatch && searchMatch
     }.sortedByDescending { it.startDate }
 
     Column(modifier = Modifier.fillMaxSize()) {
+
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            placeholder = { Text("搜索标题、备注或地点...") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "搜索") },
+            trailingIcon = if (searchQuery.isNotEmpty()) {
+                {
+                    IconButton(onClick = { searchQuery = "" }) {
+                        Icon(Icons.Default.Clear, contentDescription = "清除")
+                    }
+                }
+            } else null,
+            singleLine = true,
+            shape = RoundedCornerShape(24.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+            )
+        )
+
         TabRow(selectedTabIndex = selectedCategory) {
             Tab(selected = selectedCategory == 0, onClick = { selectedCategory = 0 }, text = { Text("日程事件") })
             Tab(selected = selectedCategory == 1, onClick = { selectedCategory = 1 }, text = { Text("临时事件") })
@@ -600,7 +651,7 @@ fun AllEventsPageView(events: List<MyEvent>, revealedId: String?, onRevealStateC
             if (filteredEvents.isEmpty()) {
                 item {
                     Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                        Text("暂无记录", color = Color.Gray)
+                        Text(if(searchQuery.isBlank()) "暂无记录" else "未找到相关日程", color = Color.Gray)
                     }
                 }
             }
@@ -635,6 +686,8 @@ fun SwipeableEventItem(
 
     val offsetX = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
+
+    val isExpired = remember(event) { isEventExpired(event) }
 
     LaunchedEffect(isRevealed) {
         if (isRevealed) {
@@ -701,19 +754,48 @@ fun SwipeableEventItem(
             color = MaterialTheme.colorScheme.surface,
             shadowElevation = 0.dp
         ) {
-            Column {
+            // 【修正】: 只在内容层应用透明度，防止透出底层按钮
+            Column(
+                modifier = Modifier.alpha(if (isExpired) 0.6f else 1f)
+            ) {
                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp, horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.width(if (event.isImportant) 8.dp else 5.dp).height(40.dp).clip(RoundedCornerShape(3.dp)).background(event.color))
+                    Box(
+                        Modifier
+                            .width(if (event.isImportant) 8.dp else 5.dp)
+                            .height(40.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(if(isExpired) Color.LightGray else event.color)
+                    )
                     Spacer(Modifier.width(16.dp))
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(event.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text(
+                                event.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                textDecoration = if (isExpired) TextDecoration.LineThrough else null
+                            )
                             if (event.isImportant) Icon(Icons.Default.Star, null, Modifier.size(16.dp).padding(start = 4.dp), tint = Color(0xFFFFC107))
                         }
                         if (event.eventType == "temp" && event.description.isNotBlank()) {
                             Text(text = "号码: ${event.description}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
                         } else {
-                            Text(text = "${event.startTime} - ${event.endTime}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "${event.startTime} - ${event.endTime}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isExpired) Color.Gray else MaterialTheme.colorScheme.primary
+                                )
+                                if (isExpired) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "(已过期)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
                         if (event.location.isNotBlank()) Text(text = event.location, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                     }
@@ -742,31 +824,36 @@ fun ModelSettingsSidebar(snackbarHostState: SnackbarHostState) {
         currentUrl.contains("openai") -> "OpenAI"
         currentUrl.contains("googleapis") -> "Gemini"
         currentUrl.isBlank() && currentModel.isBlank() -> "DeepSeek"
-        else -> "Custom"
+        else -> "自定义"
     }
 
     var selectedProvider by remember { mutableStateOf(initialProvider) }
-    var expanded by remember { mutableStateOf(false) }
+    var expandedProvider by remember { mutableStateOf(false) }
+    var expandedModel by remember { mutableStateOf(false) }
 
     var modelUrl by remember { mutableStateOf(settings.modelUrl) }
     var modelName by remember { mutableStateOf(settings.modelName) }
     var modelKey by remember { mutableStateOf(settings.modelKey) }
 
-    val providers = listOf("DeepSeek", "OpenAI", "Gemini", "Custom")
+    val providers = listOf("DeepSeek", "OpenAI", "Gemini", "自定义")
+
+    val availableModels = mapOf(
+        "DeepSeek" to listOf("deepseek-chat", "deepseek-coder", "deepseek-reasoner"),
+        "OpenAI" to listOf("gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"),
+        "Gemini" to listOf("gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp")
+    )
 
     LaunchedEffect(selectedProvider) {
-        when (selectedProvider) {
-            "DeepSeek" -> {
-                modelUrl = "https://api.deepseek.com/chat/completions"
-                modelName = "deepseek-chat"
+        if (selectedProvider != "自定义") {
+            modelUrl = when (selectedProvider) {
+                "DeepSeek" -> "https://api.deepseek.com/chat/completions"
+                "OpenAI" -> "https://api.openai.com/v1/chat/completions"
+                "Gemini" -> "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+                else -> ""
             }
-            "OpenAI" -> {
-                modelUrl = "https://api.openai.com/v1/chat/completions"
-                modelName = "gpt-4o-mini"
-            }
-            "Gemini" -> {
-                modelUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-                modelName = "gemini-1.5-flash"
+            val models = availableModels[selectedProvider] ?: emptyList()
+            if (models.isNotEmpty() && modelName !in models) {
+                modelName = models.first()
             }
         }
     }
@@ -775,29 +862,63 @@ fun ModelSettingsSidebar(snackbarHostState: SnackbarHostState) {
         Text("AI 模型配置", fontWeight = FontWeight.Bold)
 
         ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { expanded = !expanded }
+            expanded = expandedProvider,
+            onExpandedChange = { expandedProvider = !expandedProvider }
         ) {
             OutlinedTextField(
                 value = selectedProvider,
                 onValueChange = {},
                 readOnly = true,
                 label = { Text("服务提供商") },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedProvider) },
                 modifier = Modifier.menuAnchor().fillMaxWidth()
             )
             ExposedDropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false }
+                expanded = expandedProvider,
+                onDismissRequest = { expandedProvider = false }
             ) {
                 providers.forEach { item ->
                     DropdownMenuItem(
                         text = { Text(item) },
                         onClick = {
                             selectedProvider = item
-                            expanded = false
+                            expandedProvider = false
                         }
                     )
+                }
+            }
+        }
+
+        if (selectedProvider != "自定义") {
+            val models = availableModels[selectedProvider] ?: emptyList()
+            ExposedDropdownMenuBox(
+                expanded = expandedModel,
+                onExpandedChange = { expandedModel = !expandedModel }
+            ) {
+                OutlinedTextField(
+                    value = modelName,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("模型名称 (Model)") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedModel) },
+                    modifier = Modifier.menuAnchor().fillMaxWidth()
+                )
+                ExposedDropdownMenu(
+                    expanded = expandedModel,
+                    onDismissRequest = { expandedModel = false }
+                ) {
+                    models.forEach { item ->
+                        DropdownMenuItem(
+                            text = { Text(item) },
+                            onClick = {
+                                modelName = item
+                                expandedModel = false
+                                if (selectedProvider == "Gemini") {
+                                    modelUrl = "https://generativelanguage.googleapis.com/v1beta/models/$item:generateContent"
+                                }
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -811,7 +932,7 @@ fun ModelSettingsSidebar(snackbarHostState: SnackbarHostState) {
             visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None
         )
 
-        if (selectedProvider == "Custom") {
+        if (selectedProvider == "自定义") {
             OutlinedTextField(
                 value = modelUrl,
                 onValueChange = { modelUrl = it },
@@ -844,13 +965,17 @@ fun ModelSettingsSidebar(snackbarHostState: SnackbarHostState) {
     }
 }
 
+// ... PreferenceSettings, WheelPickers, ManualAddEventDialog, Data Classes 保持不变 ...
+// 为节省篇幅，以下组件代码与上次提交一致，无需修改：
+// PreferenceSettings, WheelDatePickerDialog, WheelTimePickerDialog, WheelReminderPickerDialog,
+// WheelDatePicker, WheelTimePicker, WheelPicker, ManualAddEventDialog,
+// checkAccessibilityEnabled, LocalDateSerializer, ColorSerializer, MyEvent
+
 @Composable
 fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
     val settings = MyApplication.getInstance().getSettings()
     var autoAlarm by remember { mutableStateOf(settings.autoCreateAlarm) }
     var showTomorrow by remember { mutableStateOf(settings.showTomorrowEvents) }
-
-    // 【修改点】：删除了关于胶囊通知的开关变量和 UI
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -1132,7 +1257,6 @@ fun ManualAddEventDialog(eventToEdit: MyEvent?, currentEventsCount: Int, onDismi
     }
 }
 
-// ... (Utils like checkAccessibilityEnabled, serializers) ...
 fun checkAccessibilityEnabled(context: Context): Boolean {
     val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
     val enabledServices = am.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
