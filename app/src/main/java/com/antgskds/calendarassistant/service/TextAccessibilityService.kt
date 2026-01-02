@@ -41,6 +41,8 @@ import kotlin.time.Duration.Companion.milliseconds
 
 class TextAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var analysisJob: Job? = null // 用于管理分析任务的生命周期
+
     private val NOTIFICATION_ID_STATUS = 1001
     private val NOTIFICATION_ID_LIVE = 2077
 
@@ -50,12 +52,29 @@ class TextAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
 
+    // 处理来自通知栏按钮的点击指令
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_CANCEL_ANALYSIS) {
+            cancelCurrentAnalysis()
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
+
+    private fun cancelCurrentAnalysis() {
+        Log.d(TAG, "用户取消了分析任务")
+        analysisJob?.cancel()
+        cancelStatusNotification()
+    }
+
     fun closeNotificationPanel(): Boolean {
         return performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
     }
 
     fun startAnalysis(delayDuration: Duration = 500.milliseconds) {
-        serviceScope.launch {
+        // 如果当前有正在进行的任务，先取消
+        analysisJob?.cancel()
+
+        analysisJob = serviceScope.launch {
             delay(delayDuration)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 takeScreenshotAndAnalyze()
@@ -73,7 +92,10 @@ class TextAccessibilityService : AccessibilityService() {
             mainExecutor,
             object : TakeScreenshotCallback {
                 override fun onSuccess(screenshotResult: ScreenshotResult) {
-                    processScreenshot(screenshotResult)
+                    // 在 onSuccess 中继续维护协程任务
+                    analysisJob = serviceScope.launch(Dispatchers.IO) {
+                        processScreenshot(screenshotResult)
+                    }
                 }
                 override fun onFailure(errorCode: Int) {
                     Log.e(TAG, "Screenshot failed: $errorCode")
@@ -83,89 +105,86 @@ class TextAccessibilityService : AccessibilityService() {
         )
     }
 
-    private fun processScreenshot(result: ScreenshotResult) {
-        serviceScope.launch(Dispatchers.IO) {
-            try {
-                val hardwareBuffer = result.hardwareBuffer
-                val colorSpace = result.colorSpace
-                val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
-                if (bitmap == null) {
-                    cancelStatusNotification()
-                    return@launch
-                }
+    private suspend fun processScreenshot(result: ScreenshotResult) {
+        try {
+            val hardwareBuffer = result.hardwareBuffer
+            val colorSpace = result.colorSpace
+            val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
+            if (bitmap == null) {
+                cancelStatusNotification()
+                return
+            }
 
-                val imagesDir = File(filesDir, "event_screenshots")
-                if (!imagesDir.exists()) imagesDir.mkdirs()
-                val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-                val imageFile = File(imagesDir, "IMG_$timestamp.jpg")
+            val imagesDir = File(filesDir, "event_screenshots")
+            if (!imagesDir.exists()) imagesDir.mkdirs()
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+            val imageFile = File(imagesDir, "IMG_$timestamp.jpg")
 
-                val softwareBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-                bitmap.recycle()
-                hardwareBuffer.close()
+            val softwareBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+            bitmap.recycle()
+            hardwareBuffer.close()
 
-                FileOutputStream(imageFile).use { out ->
-                    softwareBitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
-                }
+            FileOutputStream(imageFile).use { out ->
+                softwareBitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
+            }
 
-                val settings = MyApplication.getInstance().getSettings()
-                if (settings.modelKey.isBlank()) {
-                    withContext(Dispatchers.Main) {
-                        showNotification("配置缺失", "请先在 App 侧边栏填写 API Key", isProgress = false, autoLaunch = true)
-                    }
-                    return@launch
-                }
-
-                val eventsList = RecognitionProcessor.analyzeImage(softwareBitmap)
-                softwareBitmap.recycle()
-
-                val validEvents = eventsList.filter { it.title.isNotBlank() }
-
-                if (validEvents.isNotEmpty()) {
-                    val (pickupEvents, normalEvents) = validEvents.partition { it.type == "pickup" }
-
-                    // 1. 普通日程
-                    if (normalEvents.isNotEmpty()) {
-                        saveEventsLocally(normalEvents, imageFile.absolutePath)
-                        withContext(Dispatchers.Main) {
-                            val titles = normalEvents.joinToString(separator = "，") { it.title }
-                            val titleText = if (settings.autoCreateAlarm) {
-                                "成功创建 ${normalEvents.size} 条事项和 ${normalEvents.size} 个闹钟"
-                            } else {
-                                "成功创建 ${normalEvents.size} 条事项"
-                            }
-                            showNotification(titleText, titles, isProgress = false, autoLaunch = false)
-                        }
-                    }
-
-                    // 2. 取件码 -> 实时通知
-                    if (pickupEvents.isNotEmpty()) {
-                        saveEventsLocally(pickupEvents, imageFile.absolutePath)
-                        val pickup = pickupEvents.first()
-
-                        val chipText = pickup.description.trim() // 取件码
-                        val title = pickup.title
-                        val location = if (pickup.location.isNotBlank()) pickup.location else "暂无位置信息"
-                        val content = "位置: $location | 号码: $chipText"
-
-                        withContext(Dispatchers.Main) {
-                            cancelStatusNotification()
-                            postLiveUpdateSafely(chipText, title, content)
-                        }
-                    } else if (normalEvents.isEmpty()) {
-                        // 空
-                    }
-
-                } else {
-                    withContext(Dispatchers.Main) {
-                        showNotification("分析完成", "未识别到有效日程", isProgress = false)
-                    }
-                }
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Error", e)
+            val settings = MyApplication.getInstance().getSettings()
+            if (settings.modelKey.isBlank()) {
                 withContext(Dispatchers.Main) {
-                    showNotification("分析出错", "错误信息: ${e.message}")
+                    showNotification("配置缺失", "请先在 App 侧边栏填写 API Key", isProgress = false, autoLaunch = true)
                 }
+                return
+            }
+
+            val eventsList = RecognitionProcessor.analyzeImage(softwareBitmap)
+            softwareBitmap.recycle()
+
+            val validEvents = eventsList.filter { it.title.isNotBlank() }
+
+            if (validEvents.isNotEmpty()) {
+                val (pickupEvents, normalEvents) = validEvents.partition { it.type == "pickup" }
+
+                // 1. 普通日程
+                if (normalEvents.isNotEmpty()) {
+                    saveEventsLocally(normalEvents, imageFile.absolutePath)
+                    withContext(Dispatchers.Main) {
+                        val titles = normalEvents.joinToString(separator = "，") { it.title }
+                        val titleText = if (settings.autoCreateAlarm) {
+                            "成功创建 ${normalEvents.size} 条事项和 ${normalEvents.size} 个闹钟"
+                        } else {
+                            "成功创建 ${normalEvents.size} 条事项"
+                        }
+                        showNotification(titleText, titles, isProgress = false, autoLaunch = false)
+                    }
+                }
+
+                // 2. 取件码 -> 实时通知
+                if (pickupEvents.isNotEmpty()) {
+                    saveEventsLocally(pickupEvents, imageFile.absolutePath)
+                    val pickup = pickupEvents.first()
+
+                    val chipText = pickup.description.trim() // 取件码
+                    val title = pickup.title
+                    val location = if (pickup.location.isNotBlank()) pickup.location else "暂无位置信息"
+                    val content = "位置: $location | 号码: $chipText"
+
+                    withContext(Dispatchers.Main) {
+                        cancelStatusNotification()
+                        postLiveUpdateSafely(chipText, title, content)
+                    }
+                }
+
+            } else {
+                withContext(Dispatchers.Main) {
+                    showNotification("分析完成", "未识别到有效日程", isProgress = false)
+                }
+            }
+
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e // 确保协程取消正常工作
+            Log.e(TAG, "Error", e)
+            withContext(Dispatchers.Main) {
+                showNotification("分析出错", "错误信息: ${e.message}")
             }
         }
     }
@@ -251,10 +270,6 @@ class TextAccessibilityService : AccessibilityService() {
         return manufacturer.contains("Meizu", ignoreCase = true) || displayId.contains("Flyme", ignoreCase = true)
     }
 
-    // ==========================================
-    // 核心实况通知逻辑
-    // ==========================================
-
     private fun postLiveUpdateSafely(chipText: String, title: String, content: String) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -271,11 +286,9 @@ class TextAccessibilityService : AccessibilityService() {
 
         val isFlymeEnv = isFlyme()
 
-        // 1. 优先判断 Flyme (参考 StarSchedule)
         if (isFlymeEnv || TEST_FLYME_LOGIC) {
             postFlymeLiveNotification(manager, chipText, title, content, pendingIntent, capsuleColor)
         }
-        // 2. 判断 Android 16+ Native Promoted (Baklava)
         else if (Build.VERSION.SDK_INT >= 36) {
             if (!manager.canPostPromotedNotifications()) {
                 sendPermissionGuidanceNotification()
@@ -283,40 +296,33 @@ class TextAccessibilityService : AccessibilityService() {
             }
             postNativeBaklavaNotification(manager, chipText, title, content, pendingIntent, capsuleColor)
         }
-        // 3. 兜底 (普通通知)
         else {
             postCompatSamsungNotification(manager, title, content, pendingIntent, capsuleColor)
         }
     }
 
-    // --- Flyme 专属逻辑 (修复版：参照 StarSchedule) ---
     private fun postFlymeLiveNotification(
         manager: NotificationManager,
-        chipText: String, // 用于胶囊的简短文本 (如取件码)
+        chipText: String,
         title: String,
         content: String,
         pendingIntent: PendingIntent,
         color: Int
     ) {
         try {
-            // 1. 准备图标：Flyme 需要 Bitmap 且最好着色
-            // 使用 R.drawable.ic_qs_recognition (如果存在) 或默认图标
             val iconDrawable = ContextCompat.getDrawable(this, R.drawable.ic_qs_recognition)
                 ?: ContextCompat.getDrawable(this, R.drawable.ic_launcher_foreground)
 
-            // 将图标转为白色 Bitmap 以适应彩色胶囊背景
             val iconBitmap = iconDrawable?.mutate()?.let {
                 val bmp = it.toBitmap()
                 tintBitmap(bmp, Color.WHITE)
             }
             val iconObj = if (iconBitmap != null) Icon.createWithBitmap(iconBitmap) else null
 
-            // 2. 构建 Capsule Bundle (胶囊参数)
-            // notification.live.capsuleType = 3 (文本模式)
             val capsuleBundle = Bundle().apply {
-                putInt("notification.live.capsuleStatus", 1) // 1=进行中
-                putInt("notification.live.capsuleType", 3)   // 3=文本模式
-                putString("notification.live.capsuleContent", chipText) // 胶囊显示的文字
+                putInt("notification.live.capsuleStatus", 1)
+                putInt("notification.live.capsuleType", 3)
+                putString("notification.live.capsuleContent", chipText)
 
                 if (iconObj != null) {
                     putParcelable("notification.live.capsuleIcon", iconObj)
@@ -325,18 +331,14 @@ class TextAccessibilityService : AccessibilityService() {
                 putInt("notification.live.capsuleContentColor", Color.WHITE)
             }
 
-            // 3. 构建 Live Bundle (实况参数)
-            // notification.live.type = 10 (自定义视图模式)
             val liveBundle = Bundle().apply {
                 putBoolean("is_live", true)
-                putInt("notification.live.operation", 0) // 0=创建/更新
-                putInt("notification.live.type", 10)     // 10=自定义 View
+                putInt("notification.live.operation", 0)
+                putInt("notification.live.type", 10)
                 putBundle("notification.live.capsule", capsuleBundle)
                 putInt("notification.live.contentColor", Color.WHITE)
             }
 
-            // 4. 构建自定义 Layout (Type 10 必须)
-            // 提取位置信息 (从 content 字符串中解析，或者简单处理)
             val locationText = content.replace("位置: ", "").replace("| 号码: $chipText", "").trim()
             val finalLocation = if (locationText.isBlank() || locationText == "暂无位置信息") title else locationText
 
@@ -345,35 +347,29 @@ class TextAccessibilityService : AccessibilityService() {
                 setTextViewText(R.id.live_content, chipText)
                 setTextViewText(R.id.live_location, finalLocation)
                 setTextViewText(R.id.live_time, "刚刚")
-
                 if (iconBitmap != null) {
                     setImageViewBitmap(R.id.live_icon, iconBitmap)
                 }
             }
 
-            // 5. 构建通知
             val builder = Notification.Builder(this, MyApplication.CHANNEL_ID_LIVE)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle(title)
                 .setContentText(content)
                 .setContentIntent(pendingIntent)
-                .setCustomContentView(contentRemoteViews)     // 关键：折叠视图
-                .setCustomBigContentView(contentRemoteViews)  // 关键：展开视图
-                .addExtras(liveBundle)                        // 关键：Flyme 参数
-                .setOngoing(true)                             // 关键：必须常驻
+                .setCustomContentView(contentRemoteViews)
+                .setCustomBigContentView(contentRemoteViews)
+                .addExtras(liveBundle)
+                .setOngoing(true)
                 .setAutoCancel(false)
                 .setCategory(Notification.CATEGORY_EVENT)
 
             manager.notify(NOTIFICATION_ID_LIVE, builder.build())
-            Log.d(TAG, "Flyme Live Notification Sent: $title")
-
         } catch (e: Exception) {
-            Log.e(TAG, "Flyme Live Notification Failed", e)
             postCompatSamsungNotification(manager, title, content, pendingIntent, color)
         }
     }
 
-    // 辅助：Bitmap 着色
     private fun tintBitmap(source: Bitmap, color: Int): Bitmap {
         val bitmap = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
@@ -384,7 +380,6 @@ class TextAccessibilityService : AccessibilityService() {
         return bitmap
     }
 
-    // --- Android 16+ Native Promoted Logic ---
     private fun postNativeBaklavaNotification(
         manager: NotificationManager,
         critText: String,
@@ -404,7 +399,6 @@ class TextAccessibilityService : AccessibilityService() {
                 .setStyle(Notification.BigTextStyle().bigText(content))
                 .setColor(color)
 
-            // 反射调用 setShortCriticalText 和 setRequestPromotedOngoing
             val methodSetText = Notification.Builder::class.java.getMethod("setShortCriticalText", String::class.java)
             methodSetText.invoke(builder, critText)
 
@@ -413,12 +407,10 @@ class TextAccessibilityService : AccessibilityService() {
 
             manager.notify(NOTIFICATION_ID_LIVE, builder.build())
         } catch (e: Exception) {
-            Log.e(TAG, "Android 16 Native分支: 异常", e)
             postCompatSamsungNotification(manager, title, content, pendingIntent, color)
         }
     }
 
-    // --- 兜底/兼容模式 ---
     private fun postCompatSamsungNotification(
         manager: NotificationManager,
         title: String,
@@ -486,6 +478,17 @@ class TextAccessibilityService : AccessibilityService() {
             builder.setProgress(0, 0, true)
             builder.setPriority(NotificationCompat.PRIORITY_LOW)
             builder.setOngoing(true)
+
+            // 添加取消按钮
+            val cancelIntent = Intent(this, TextAccessibilityService::class.java).apply {
+                action = ACTION_CANCEL_ANALYSIS
+            }
+            val cancelPendingIntent = PendingIntent.getService(
+                this, 102, cancelIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "取消分析", cancelPendingIntent)
+
         } else {
             builder.setProgress(0, 0, false)
             builder.setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -498,6 +501,7 @@ class TextAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "TextAccessibilityService"
+        private const val ACTION_CANCEL_ANALYSIS = "ACTION_CANCEL_ANALYSIS"
         @Volatile var instance: TextAccessibilityService? = null
     }
 
