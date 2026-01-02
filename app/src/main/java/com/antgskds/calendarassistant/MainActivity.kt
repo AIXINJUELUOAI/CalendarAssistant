@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import com.antgskds.calendarassistant.receiver.DailySummaryScheduler
 import com.antgskds.calendarassistant.service.TextAccessibilityService
 import com.antgskds.calendarassistant.util.NotificationScheduler
 import com.antgskds.calendarassistant.ui.theme.CalendarAssistantTheme
@@ -124,7 +125,6 @@ fun isEventExpired(event: MyEvent): Boolean {
 }
 
 // 辅助：创建系统闹钟 (Flyme/国产ROM 适配版)
-// 使用 Intent 方式唤起系统闹钟，这是 Flyme 兼容性最好的方案（方案1）
 fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, date: LocalDate) {
     try {
         val parts = timeStr.split(":")
@@ -139,10 +139,6 @@ fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, da
             putExtra(AlarmClock.EXTRA_SKIP_UI, true)
             putExtra(AlarmClock.EXTRA_VIBRATE, true)
 
-            // 【关键适配】如果日期不是今天，必须计算星期几
-            // AlarmClock API 不支持绝对日期，只支持 EXTRA_DAYS (ArrayList<Integer>)
-            // Java Calendar: Sunday=1, Monday=2 ... Saturday=7
-            // Java LocalDate: Monday=1 ... Sunday=7
             if (date != LocalDate.now()) {
                 val dayOfWeek = date.dayOfWeek.value // 1-7
                 val calendarDay = when (dayOfWeek) {
@@ -433,7 +429,11 @@ fun TodayPageView(
     val isToday = selectedDate == LocalDate.now()
     val settings = remember { MyApplication.getInstance().getSettings() }
 
-    val currentEvents = events.filter { it.startDate <= selectedDate && it.endDate >= selectedDate }
+    // 【修改点】：在这里增加了 && !isEventExpired(it)
+    // 使得已过期的日程不再出现在 currentEvents 列表中
+    val currentEvents = events.filter {
+        (it.startDate <= selectedDate && it.endDate >= selectedDate) && !isEventExpired(it)
+    }
 
     val showTomorrow = settings.showTomorrowEvents
     val tomorrowEvents = if (isToday && showTomorrow) {
@@ -965,17 +965,14 @@ fun ModelSettingsSidebar(snackbarHostState: SnackbarHostState) {
     }
 }
 
-// ... PreferenceSettings, WheelPickers, ManualAddEventDialog, Data Classes 保持不变 ...
-// 为节省篇幅，以下组件代码与上次提交一致，无需修改：
-// PreferenceSettings, WheelDatePickerDialog, WheelTimePickerDialog, WheelReminderPickerDialog,
-// WheelDatePicker, WheelTimePicker, WheelPicker, ManualAddEventDialog,
-// checkAccessibilityEnabled, LocalDateSerializer, ColorSerializer, MyEvent
-
 @Composable
 fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
+    val context = LocalContext.current
     val settings = MyApplication.getInstance().getSettings()
+
     var autoAlarm by remember { mutableStateOf(settings.autoCreateAlarm) }
     var showTomorrow by remember { mutableStateOf(settings.showTomorrowEvents) }
+    var dailySummary by remember { mutableStateOf(settings.isDailySummaryEnabled) }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -1002,7 +999,7 @@ fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Text("主页显示明日日程", style = MaterialTheme.typography.bodyLarge)
+                Text("显示明日日程", style = MaterialTheme.typography.bodyLarge)
                 Text("在今日日程列表底部预览", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
             }
             Switch(
@@ -1010,6 +1007,31 @@ fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
                 onCheckedChange = {
                     showTomorrow = it
                     settings.showTomorrowEvents = it
+                }
+            )
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("每日日程提醒", style = MaterialTheme.typography.bodyLarge)
+                Text("早6点提醒今日，晚10点预告明日", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            }
+            Switch(
+                checked = dailySummary,
+                onCheckedChange = { isChecked ->
+                    dailySummary = isChecked
+                    settings.isDailySummaryEnabled = isChecked
+
+                    if (isChecked) {
+                        DailySummaryScheduler.scheduleAll(context)
+                    } else {
+                        DailySummaryScheduler.cancelAll(context)
+                    }
                 }
             )
         }

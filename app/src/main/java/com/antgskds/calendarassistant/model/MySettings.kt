@@ -33,4 +33,9 @@ class MySettings(context: Context) {
     var showTomorrowEvents: Boolean
         get() = prefs.getBoolean("show_tomorrow_events", false)
         set(value) = prefs.edit().putBoolean("show_tomorrow_events", value).apply()
+
+    // 每日日程汇总开关
+    var isDailySummaryEnabled: Boolean
+        get() = prefs.getBoolean("daily_summary_enabled", false)
+        set(value) = prefs.edit().putBoolean("daily_summary_enabled", value).apply()
 }

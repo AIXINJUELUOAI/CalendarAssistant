@@ -70,6 +70,16 @@
 
         <receiver android:name=".receiver.AlarmReceiver" />
 
+        <receiver
+            android:name=".receiver.DailySummaryReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.antgskds.calendarassistant.action.MORNING_SUMMARY" />
+                <action android:name="com.antgskds.calendarassistant.action.NIGHT_SUMMARY" />
+            </intent-filter>
+        </receiver>
+
         <meta-data android:name="com.samsung.android.support.ongoing_activity" android:value="true" />
 
     </application>
