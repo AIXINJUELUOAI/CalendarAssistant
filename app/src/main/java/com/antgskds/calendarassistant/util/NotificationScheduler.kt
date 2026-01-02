@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.util.Log
 import com.antgskds.calendarassistant.MyEvent
 import com.antgskds.calendarassistant.receiver.AlarmReceiver
@@ -72,11 +73,23 @@ object NotificationScheduler {
         )
 
         try {
-            alarmManager.setExactAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                triggerTime,
-                pendingIntent
-            )
+            // 【Flyme 专属适配】
+            // 使用 setAlarmClock 而不是 setExact。
+            // 优势1：在 Flyme 等国产 ROM 上优先级最高，极难被杀后台。
+            // 优势2：通常不需要 REQUEST_SCHEDULE_EXACT_ALARM 权限（因为在状态栏会有小闹钟图标）。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setAlarmClock(
+                    AlarmManager.AlarmClockInfo(triggerTime, pendingIntent),
+                    pendingIntent
+                )
+            } else {
+                // 低版本兼容
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerTime,
+                    pendingIntent
+                )
+            }
             Log.d("Scheduler", "Scheduled alarm for ${event.title} at $label")
         } catch (e: SecurityException) {
             Log.e("Scheduler", "Permission missing for exact alarm", e)

@@ -33,6 +33,4 @@ class MySettings(context: Context) {
     var showTomorrowEvents: Boolean
         get() = prefs.getBoolean("show_tomorrow_events", false)
         set(value) = prefs.edit().putBoolean("show_tomorrow_events", value).apply()
-
-    // [已移除] 开启胶囊通知 (实验性) - enableFakeCallStyle
 }
