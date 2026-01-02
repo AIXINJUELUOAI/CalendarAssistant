@@ -144,33 +144,58 @@ class TextAccessibilityService : AccessibilityService() {
             if (validEvents.isNotEmpty()) {
                 val (pickupEvents, normalEvents) = validEvents.partition { it.type == "pickup" }
 
-                // 1. 普通日程
-                if (normalEvents.isNotEmpty()) {
+                // --- 修改点：分别处理保存逻辑，并获取实际保存的数量 ---
+
+                // 1. 处理普通日程
+                val addedNormalEvents = if (normalEvents.isNotEmpty()) {
                     saveEventsLocally(normalEvents, imageFile.absolutePath)
-                    withContext(Dispatchers.Main) {
-                        val titles = normalEvents.joinToString(separator = "，") { it.title }
-                        val titleText = if (settings.autoCreateAlarm) {
-                            "成功创建 ${normalEvents.size} 条事项和 ${normalEvents.size} 个闹钟"
-                        } else {
-                            "成功创建 ${normalEvents.size} 条事项"
-                        }
-                        showNotification(titleText, titles, isProgress = false, autoLaunch = false)
-                    }
-                }
+                } else emptyList()
 
-                // 2. 取件码 -> 实时通知
-                if (pickupEvents.isNotEmpty()) {
+                // 2. 处理取件码 (同样需要去重)
+                val addedPickupEvents = if (pickupEvents.isNotEmpty()) {
                     saveEventsLocally(pickupEvents, imageFile.absolutePath)
-                    val pickup = pickupEvents.first()
+                } else emptyList()
 
-                    val chipText = pickup.description.trim() // 取件码
-                    val title = pickup.title
-                    val location = if (pickup.location.isNotBlank()) pickup.location else "暂无位置信息"
-                    val content = "位置: $location | 号码: $chipText"
+                // --- 结果反馈逻辑优化 ---
 
-                    withContext(Dispatchers.Main) {
-                        cancelStatusNotification()
-                        postLiveUpdateSafely(chipText, title, content)
+                withContext(Dispatchers.Main) {
+                    // 1. 普通日程通知
+                    if (normalEvents.isNotEmpty()) {
+                        val duplicateCount = normalEvents.size - addedNormalEvents.size
+
+                        if (addedNormalEvents.isNotEmpty()) {
+                            val titles = addedNormalEvents.joinToString(separator = "，") { it.title }
+                            val baseText = "新创建 ${addedNormalEvents.size} 条事项"
+                            val alarmText = if (settings.autoCreateAlarm) "及闹钟" else ""
+                            val filterText = if (duplicateCount > 0) " (已过滤 ${duplicateCount} 条重复)" else ""
+
+                            val titleText = "$baseText$alarmText$filterText"
+                            showNotification(titleText, titles, isProgress = false, autoLaunch = false)
+                        } else {
+                            // 虽然识别到了，但全是重复的
+                            showNotification("无新增日程", "识别到 ${normalEvents.size} 条记录均为重复项", isProgress = false, autoLaunch = false)
+                        }
+                    }
+
+                    // 2. 取件码实时通知
+                    if (pickupEvents.isNotEmpty()) {
+                        if (addedPickupEvents.isNotEmpty()) {
+                            val pickup = addedPickupEvents.first()
+                            val chipText = pickup.description.trim() // 取件码
+                            val title = pickup.title
+                            val location = if (pickup.location.isNotBlank()) pickup.location else "暂无位置信息"
+                            val content = "位置: $location | 号码: $chipText"
+
+                            cancelStatusNotification()
+                            postLiveUpdateSafely(chipText, title, content)
+                        } else {
+                            // 取件码是重复的，可以选择不弹窗，或者提示已存在
+                            Log.d(TAG, "取件码已存在，跳过实时通知更新")
+                            if (normalEvents.isEmpty()) {
+                                // 如果既没有新日程也没有新取件码，给个提示
+                                showNotification("无新增内容", "相关取件码或日程已存在", isProgress = false)
+                            }
+                        }
                     }
                 }
 
@@ -189,7 +214,13 @@ class TextAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun saveEventsLocally(aiEvents: List<CalendarEventData>, imagePath: String) {
+    /**
+     * 保存事件到本地，包含去重逻辑
+     * @return 返回实际成功插入的事件列表
+     */
+    private fun saveEventsLocally(aiEvents: List<CalendarEventData>, imagePath: String): List<MyEvent> {
+        val actuallyAdded = mutableListOf<MyEvent>()
+
         try {
             val app = MyApplication.getInstance()
             val settings = app.getSettings()
@@ -209,29 +240,68 @@ class TextAccessibilityService : AccessibilityService() {
 
                 val finalEventType = if (aiEvent.type == "pickup") "temp" else "event"
 
-                val newEvent = MyEvent(
-                    id = UUID.randomUUID().toString(),
-                    title = aiEvent.title,
-                    startDate = startDateTime.toLocalDate(),
-                    endDate = endDateTime.toLocalDate(),
-                    startTime = startDateTime.format(DateTimeFormatter.ofPattern("HH:mm")),
-                    endTime = endDateTime.format(DateTimeFormatter.ofPattern("HH:mm")),
-                    location = aiEvent.location,
-                    description = aiEvent.description,
-                    color = getNextColor(currentEvents.size),
-                    sourceImagePath = imagePath,
-                    eventType = finalEventType
-                )
-                currentEvents.add(newEvent)
+                // 准备构建新对象，但先不生成 UUID，先做对比
+                val newEventTitle = aiEvent.title.trim()
+                val newEventDesc = aiEvent.description.trim()
+                val newStartDate = startDateTime.toLocalDate()
+                val newStartTime = startDateTime.format(DateTimeFormatter.ofPattern("HH:mm"))
 
-                if (shouldAutoAlarm && finalEventType == "event") {
-                    createSystemAlarm(aiEvent.title, startDateTime.hour, startDateTime.minute, startDateTime.toLocalDate())
+                // --- 核心去重逻辑 ---
+                val isDuplicate = currentEvents.any { existing ->
+                    if (finalEventType == "event") {
+                        // 普通日程去重策略：日期相同 && 时间相同 && 标题相同
+                        val sameDate = existing.startDate == newStartDate
+                        val sameTime = existing.startTime == newStartTime
+                        val sameTitle = existing.title.trim() == newEventTitle
+                        val sameType = existing.eventType == "event"
+                        sameDate && sameTime && sameTitle && sameType
+                    } else {
+                        // 取件码去重策略：类型相同 && 标题(平台)相同 && 描述(号码)相同
+                        val sameType = existing.eventType == "temp"
+                        val sameTitle = existing.title.trim() == newEventTitle
+                        // 取件码的核心是号码，号码一般存在 description 中
+                        val sameCode = existing.description.trim() == newEventDesc
+                        sameType && sameTitle && sameCode
+                    }
+                }
+
+                if (!isDuplicate) {
+                    val newEvent = MyEvent(
+                        id = UUID.randomUUID().toString(),
+                        title = newEventTitle,
+                        startDate = newStartDate,
+                        endDate = endDateTime.toLocalDate(),
+                        startTime = newStartTime,
+                        endTime = endDateTime.format(DateTimeFormatter.ofPattern("HH:mm")),
+                        location = aiEvent.location,
+                        description = newEventDesc,
+                        color = getNextColor(currentEvents.size),
+                        sourceImagePath = imagePath,
+                        eventType = finalEventType
+                    )
+                    currentEvents.add(newEvent)
+                    actuallyAdded.add(newEvent)
+
+                    // 只有实际添加了，才创建闹钟
+                    if (shouldAutoAlarm && finalEventType == "event") {
+                        createSystemAlarm(newEvent.title, startDateTime.hour, startDateTime.minute, startDateTime.toLocalDate())
+                    }
+                    Log.i(TAG, "新增事件: ${newEvent.title} (${newEvent.startTime})")
+                } else {
+                    Log.i(TAG, "跳过重复事件: $newEventTitle")
                 }
             }
-            eventStore.saveEvents(currentEvents)
+
+            // 只有当有新数据时才写入文件
+            if (actuallyAdded.isNotEmpty()) {
+                eventStore.saveEvents(currentEvents)
+            }
+
         } catch (e: Exception) {
             Log.e(TAG, "后台保存失败", e)
         }
+
+        return actuallyAdded
     }
 
     private fun createSystemAlarm(title: String, hour: Int, minute: Int, date: java.time.LocalDate) {
