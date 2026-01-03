@@ -152,7 +152,7 @@ class TextAccessibilityService : AccessibilityService() {
                 } else emptyList()
 
                 withContext(Dispatchers.Main) {
-                    // 普通日程结果通知
+                    // 1. 普通日程结果通知
                     if (normalEvents.isNotEmpty()) {
                         val duplicateCount = normalEvents.size - addedNormalEvents.size
                         if (addedNormalEvents.isNotEmpty()) {
@@ -167,17 +167,40 @@ class TextAccessibilityService : AccessibilityService() {
                         }
                     }
 
-                    // 取件码实况通知
+                    // 2. 取件码实况通知 (核心修改部分)
                     if (pickupEvents.isNotEmpty()) {
                         if (addedPickupEvents.isNotEmpty()) {
-                            val pickup = addedPickupEvents.first()
-                            val chipText = pickup.description.trim() // 取件码
-                            val title = pickup.title
-                            val location = if (pickup.location.isNotBlank()) pickup.location else "暂无位置信息"
-                            val content = "位置: $location | 号码: $chipText"
+                            // --- 修改开始：判断是单个还是多个包裹 ---
+                            val count = addedPickupEvents.size
+                            if (count == 1) {
+                                // === 单个包裹逻辑 (保持原样) ===
+                                val pickup = addedPickupEvents.first()
+                                val chipText = pickup.description.trim() // 胶囊显示取件码
+                                val title = pickup.title
+                                val location = if (pickup.location.isNotBlank()) pickup.location else "暂无位置信息"
+                                val content = "位置: $location | 号码: $chipText"
 
-                            cancelStatusNotification()
-                            postLiveUpdateSafely(chipText, title, content)
+                                cancelStatusNotification()
+                                postLiveUpdateSafely(chipText, title, content)
+                            } else {
+                                // === 多个包裹逻辑 (聚合展示) ===
+                                val chipText = "待取${count}件" // 胶囊显示摘要
+                                val title = "当前有 $count 个待取件任务"
+
+                                // 构建多行列表内容
+                                val sb = StringBuilder()
+                                addedPickupEvents.forEachIndexed { index, event ->
+                                    // 格式: • [顺丰取件] K-5033 (中区食堂)
+                                    val locStr = if (event.location.isNotBlank()) " (${event.location})" else ""
+                                    sb.append("• [${event.title}] ${event.description}$locStr")
+                                    if (index < count - 1) sb.append("\n")
+                                }
+                                val finalContent = sb.toString()
+
+                                cancelStatusNotification()
+                                postLiveUpdateSafely(chipText, title, finalContent)
+                            }
+                            // --- 修改结束 ---
                         } else {
                             Log.d(TAG, "取件码已存在，跳过实时通知更新")
                             if (normalEvents.isEmpty()) {
@@ -311,10 +334,17 @@ class TextAccessibilityService : AccessibilityService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // 颜色定义
-        val capsuleColor = if (isMealEvent(title)) Color.parseColor("#FFD600") // 黄色
-        else if (isPackageEvent(title)) Color.parseColor("#2196F3") // 蓝色
-        else Color.parseColor("#00C853") // 绿色
+        // 颜色定义：如果标题里有"个"（说明是聚合消息），默认用绿色；否则按类型判断
+        val isMultiItem = title.contains("个待取")
+        val capsuleColor = if (isMultiItem) {
+            Color.parseColor("#00C853") // 聚合状态默认绿色
+        } else if (isMealEvent(title)) {
+            Color.parseColor("#FFD600") // 取餐黄色
+        } else if (isPackageEvent(title)) {
+            Color.parseColor("#2196F3") // 快递蓝色
+        } else {
+            Color.parseColor("#00C853") // 其他绿色
+        }
 
         // 1. 优先检测 Flyme 实况支持
         if (FlymeUtils.isLiveNotificationEnabled(this) || TEST_FLYME_LOGIC) {
@@ -360,8 +390,8 @@ class TextAccessibilityService : AccessibilityService() {
             // 核心：Flyme 协议 Bundle
             val capsuleBundle = Bundle().apply {
                 putInt("notification.live.capsuleStatus", 1) // 1: 进行中
-                putInt("notification.live.capsuleType", 1)   // 【关键修正】使用标准样式 1
-                putString("notification.live.capsuleContent", chipText) // 胶囊号码
+                putInt("notification.live.capsuleType", 1)   // 使用标准样式 1
+                putString("notification.live.capsuleContent", chipText) // 胶囊号码或"待取X件"
 
                 if (iconObj != null) {
                     putParcelable("notification.live.capsuleIcon", iconObj)
@@ -378,8 +408,17 @@ class TextAccessibilityService : AccessibilityService() {
                 putInt("notification.live.contentColor", contentTextColor)
             }
 
-            // 构造 RemoteViews
-            val locationText = content.replace("位置: ", "").replace("| 号码: $chipText", "").trim()
+            // --- 修改：适配列表内容的展示 ---
+            // 如果 content 包含换行符或圆点，说明是多条列表
+            val isListContent = content.contains("\n") || content.contains("•")
+
+            val locationText = if (isListContent) {
+                "下拉查看详情" // 列表模式下，魅族小窗显示引导语
+            } else {
+                // 单条模式下，尝试解析原有的格式
+                content.replace("位置: ", "").replace("| 号码: $chipText", "").trim()
+            }
+
             val finalLocation = if (locationText.isBlank() || locationText == "暂无位置信息") title else locationText
 
             val contentRemoteViews = RemoteViews(packageName, R.layout.notification_live_flyme).apply {
@@ -395,10 +434,11 @@ class TextAccessibilityService : AccessibilityService() {
             val builder = Notification.Builder(this, MyApplication.CHANNEL_ID_LIVE)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle(title)
-                .setContentText(content)
+                .setContentText(content) // 这里的 content 是完整的列表字符串
                 .setContentIntent(pendingIntent)
-                .setCustomContentView(contentRemoteViews)
-                .setCustomBigContentView(contentRemoteViews)
+                .setCustomContentView(contentRemoteViews) // 小窗视图
+                .setCustomBigContentView(contentRemoteViews) // 展开视图(魅族旧版逻辑)
+                .setStyle(Notification.BigTextStyle().bigText(content)) // 【关键】设置原生展开样式为BigText，确保显示完整列表
                 .addExtras(liveBundle)
                 .setOngoing(true)
                 .setAutoCancel(false)
@@ -454,7 +494,7 @@ class TextAccessibilityService : AccessibilityService() {
                 .setContentText(content)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
-                .setStyle(Notification.BigTextStyle().bigText(content))
+                .setStyle(Notification.BigTextStyle().bigText(content)) // 支持多行列表
                 .setColor(color)
 
             val methodSetText = Notification.Builder::class.java.getMethod("setShortCriticalText", String::class.java)
@@ -482,7 +522,7 @@ class TextAccessibilityService : AccessibilityService() {
             .setContentText(content)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content)) // 支持多行列表
             .setColor(color)
             .setColorized(true)
         manager.notify(NOTIFICATION_ID_LIVE, builder.build())
