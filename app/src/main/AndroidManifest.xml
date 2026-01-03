@@ -9,11 +9,9 @@
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
-
-    <!-- 新增：调用系统闹钟权限 -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
-    <!-- 【新增】魅族实况通知状态读取权限 (参考自 StarSchedule) -->
+    <!-- 【新增 1/2】Flyme 实况通知状态读取权限 -->
     <uses-permission android:name="flyme.permission.READ_NOTIFICATION_LIVE_STATE" />
 
     <application
@@ -28,9 +26,14 @@
         android:theme="@style/Theme.CalendarAssistant"
         tools:targetApi="31">
 
-        <!-- 【新增】告诉 Flyme 系统此应用支持实况通知 (必须添加) -->
+        <!-- 【新增 2/2】告诉 Flyme 系统此应用支持实况通知 -->
         <meta-data
             android:name="com.meizu.flyme.live_notification"
+            android:value="true" />
+
+        <!-- 三星实况通知支持 -->
+        <meta-data
+            android:name="com.samsung.android.support.ongoing_activity"
             android:value="true" />
 
         <activity
@@ -79,8 +82,6 @@
                 <action android:name="com.antgskds.calendarassistant.action.NIGHT_SUMMARY" />
             </intent-filter>
         </receiver>
-
-        <meta-data android:name="com.samsung.android.support.ongoing_activity" android:value="true" />
 
     </application>
 </manifest>
