@@ -38,4 +38,11 @@ class MySettings(context: Context) {
     var isDailySummaryEnabled: Boolean
         get() = prefs.getBoolean("daily_summary_enabled", false)
         set(value) = prefs.edit().putBoolean("daily_summary_enabled", value).apply()
+
+    // --- 新增：临时事件(取件码)的时间基准 ---
+    // true = 使用识别时的系统时间 (默认)
+    // false = 尝试从文本中提取发生时间
+    var tempEventsUseRecognitionTime: Boolean
+        get() = prefs.getBoolean("temp_events_use_rec_time", true)
+        set(value) = prefs.edit().putBoolean("temp_events_use_rec_time", value).apply()
 }
