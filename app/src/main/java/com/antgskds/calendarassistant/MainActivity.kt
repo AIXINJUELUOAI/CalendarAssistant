@@ -973,6 +973,8 @@ fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
     var autoAlarm by remember { mutableStateOf(settings.autoCreateAlarm) }
     var showTomorrow by remember { mutableStateOf(settings.showTomorrowEvents) }
     var dailySummary by remember { mutableStateOf(settings.isDailySummaryEnabled) }
+    // 【新增】实况胶囊开关状态
+    var liveCapsule by remember { mutableStateOf(settings.isLiveCapsuleEnabled) }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -1012,6 +1014,39 @@ fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
         }
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+        // --- 【新增】实况胶囊设置项 (修改版) ---
+        // 降级处理逻辑：用户需手动开启
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                // 修改 1 & 2: 标题直接加 (Beta)，移除 Chip
+                Text("实况胶囊通知 (Beta)", style = MaterialTheme.typography.bodyLarge)
+
+                // 修改 3: 红字警示文案，强调风险
+                Text(
+                    text = "需开启“无障碍”权限。实验性功能: 可能导致APP通知不稳定、界面异常或耗电增加",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error // 使用警告红
+                )
+            }
+            Switch(
+                checked = liveCapsule,
+                onCheckedChange = {
+                    liveCapsule = it
+                    settings.isLiveCapsuleEnabled = it
+                    if (it) {
+                        Toast.makeText(context, "请确保已开启无障碍服务，否则功能不生效", Toast.LENGTH_LONG).show()
+                    }
+                }
+            )
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,

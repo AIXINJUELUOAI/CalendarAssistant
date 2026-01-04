@@ -39,10 +39,14 @@ class MySettings(context: Context) {
         get() = prefs.getBoolean("daily_summary_enabled", false)
         set(value) = prefs.edit().putBoolean("daily_summary_enabled", value).apply()
 
-    // --- 新增：临时事件(取件码)的时间基准 ---
-    // true = 使用识别时的系统时间 (默认)
-    // false = 尝试从文本中提取发生时间
+    // 临时事件(取件码)的时间基准
     var tempEventsUseRecognitionTime: Boolean
         get() = prefs.getBoolean("temp_events_use_rec_time", true)
         set(value) = prefs.edit().putBoolean("temp_events_use_rec_time", value).apply()
+
+    // --- 【新增】: 实况胶囊通知开关 (Beta) ---
+    // 只有当此开关开启 && 无障碍服务运行时，才会在日程开始时发送状态栏胶囊。
+    var isLiveCapsuleEnabled: Boolean
+        get() = prefs.getBoolean("live_capsule_enabled", false)
+        set(value) = prefs.edit().putBoolean("live_capsule_enabled", value).apply()
 }

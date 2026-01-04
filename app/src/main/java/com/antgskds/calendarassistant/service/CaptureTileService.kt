@@ -8,12 +8,20 @@ import android.graphics.drawable.Icon
 import android.provider.Settings
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.antgskds.calendarassistant.MyApplication
 import com.antgskds.calendarassistant.R
 import kotlin.time.Duration.Companion.milliseconds
 
+/**
+ * 快捷设置磁贴服务
+ *
+ * 职责：用户点击通知栏磁贴时触发，调用 [TextAccessibilityService] 进行截图分析。
+ */
 class CaptureTileService : TileService() {
+
+    private val TAG = "CaptureTileDebug"
 
     override fun onStartListening() {
         super.onStartListening()
@@ -21,15 +29,13 @@ class CaptureTileService : TileService() {
 
         tile.state = Tile.STATE_INACTIVE
         tile.label = "识别事件"
-
-        // 【修改此处】：引用刚才新建的、无边距的专用图标
         tile.icon = Icon.createWithResource(this, R.drawable.ic_qs_recognition)
-
         tile.updateTile()
     }
 
     override fun onClick() {
         super.onClick()
+        Log.e(TAG, ">>> 磁贴被点击了! <<<")
 
         val tile = qsTile
         if (tile != null) {
@@ -37,10 +43,16 @@ class CaptureTileService : TileService() {
             tile.updateTile()
         }
 
+        // 获取无障碍服务实例
         val service = TextAccessibilityService.instance
 
         if (service != null) {
+            Log.e(TAG, "无障碍服务实例存在，准备调用 startAnalysis")
+
+            // 1. 收起通知栏
             service.closeNotificationPanel()
+
+            // 2. 开始分析
             service.startAnalysis(500.milliseconds)
 
             if (tile != null) {
@@ -48,6 +60,7 @@ class CaptureTileService : TileService() {
                 tile.updateTile()
             }
         } else {
+            Log.e(TAG, "无障碍服务实例为 NULL，发送提示通知")
             sendEnableServiceNotification()
 
             if (tile != null) {

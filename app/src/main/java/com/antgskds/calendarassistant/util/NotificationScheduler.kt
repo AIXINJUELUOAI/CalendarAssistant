@@ -8,12 +8,13 @@ import android.os.Build
 import android.util.Log
 import com.antgskds.calendarassistant.MyEvent
 import com.antgskds.calendarassistant.receiver.AlarmReceiver
+import com.antgskds.calendarassistant.service.CapsuleService
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 object NotificationScheduler {
 
-    // 提醒时间选项 (分钟数 -> 显示文本)
     val REMINDER_OPTIONS = listOf(
         0 to "日程开始时",
         5 to "5分钟前",
@@ -27,70 +28,90 @@ object NotificationScheduler {
         2880 to "2天前"
     )
 
+    const val ACTION_REMINDER = "ACTION_REMINDER"
+    const val ACTION_CAPSULE_START = "ACTION_CAPSULE_START"
+    const val ACTION_CAPSULE_END = "ACTION_CAPSULE_END"
+
+    private const val OFFSET_CAPSULE_START = 100000
+    private const val OFFSET_CAPSULE_END = 200000
+
     fun scheduleReminders(context: Context, event: MyEvent) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        // 只有当有 SCHEDULE_EXACT_ALARM 权限时才设置精确闹钟，否则可能崩溃（Android 12+）
-        // 这里简化处理，假设已有权限或捕获异常
+        val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 
-        val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
-        val eventDateTime = try {
+        val startDateTime = try {
             LocalDateTime.parse("${event.startDate} ${event.startTime}", formatter)
         } catch (e: Exception) { return }
 
-        val eventMillis = eventDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val endDateTime = try {
+            LocalDateTime.parse("${event.endDate} ${event.endTime}", formatter)
+        } catch (e: Exception) { startDateTime.plusHours(1) }
+
+        val startMillis = startDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val endMillis = endDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
 
         event.reminders.forEach { minutesBefore ->
-            val triggerTime = eventMillis - (minutesBefore * 60 * 1000)
-
-            // 如果触发时间已经过去了，就不设置了
+            val triggerTime = startMillis - (minutesBefore * 60 * 1000)
             if (triggerTime > System.currentTimeMillis()) {
                 val label = REMINDER_OPTIONS.find { it.first == minutesBefore }?.second ?: ""
-                scheduleSingleAlarm(context, event, minutesBefore, triggerTime, label, alarmManager)
+                scheduleSingleAlarm(
+                    context, event, minutesBefore, triggerTime, label,
+                    ACTION_REMINDER, alarmManager
+                )
             }
+        }
+
+        if (startMillis > System.currentTimeMillis()) {
+            scheduleCapsuleAlarm(context, event, startMillis, ACTION_CAPSULE_START, alarmManager)
+        }
+
+        if (endMillis > System.currentTimeMillis()) {
+            scheduleCapsuleAlarm(context, event, endMillis, ACTION_CAPSULE_END, alarmManager)
         }
     }
 
     private fun scheduleSingleAlarm(
-        context: Context,
-        event: MyEvent,
-        minutesBefore: Int,
-        triggerTime: Long,
-        label: String,
-        alarmManager: AlarmManager
+        context: Context, event: MyEvent, minutesBefore: Int, triggerTime: Long, label: String, actionType: String, alarmManager: AlarmManager
     ) {
         val intent = Intent(context, AlarmReceiver::class.java).apply {
+            action = actionType
             putExtra("EVENT_ID", event.id)
             putExtra("EVENT_TITLE", event.title)
             putExtra("REMINDER_LABEL", label)
         }
-
-        // RequestCode 需要唯一：EventID Hash + 分钟数
         val requestCode = (event.id.hashCode() + minutesBefore).toInt()
+        scheduleAlarmExact(context, triggerTime, intent, requestCode, alarmManager)
+    }
 
+    private fun scheduleCapsuleAlarm(
+        context: Context, event: MyEvent, triggerTime: Long, actionType: String, alarmManager: AlarmManager
+    ) {
+        val intent = Intent(context, AlarmReceiver::class.java).apply {
+            action = actionType
+            putExtra("EVENT_ID", event.id)
+            putExtra("EVENT_TITLE", event.title)
+            putExtra("EVENT_LOCATION", event.location)
+            putExtra("EVENT_START_TIME", "${event.startTime}")
+            putExtra("EVENT_END_TIME", "${event.endTime}")
+        }
+        val offset = if (actionType == ACTION_CAPSULE_START) OFFSET_CAPSULE_START else OFFSET_CAPSULE_END
+        val requestCode = (event.id.hashCode() + offset).toInt()
+        scheduleAlarmExact(context, triggerTime, intent, requestCode, alarmManager)
+    }
+
+    private fun scheduleAlarmExact(
+        context: Context, triggerTime: Long, intent: Intent, requestCode: Int, alarmManager: AlarmManager
+    ) {
         val pendingIntent = PendingIntent.getBroadcast(
             context, requestCode, intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-
         try {
-            // 【Flyme 专属适配】
-            // 使用 setAlarmClock 而不是 setExact。
-            // 优势1：在 Flyme 等国产 ROM 上优先级最高，极难被杀后台。
-            // 优势2：通常不需要 REQUEST_SCHEDULE_EXACT_ALARM 权限（因为在状态栏会有小闹钟图标）。
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                alarmManager.setAlarmClock(
-                    AlarmManager.AlarmClockInfo(triggerTime, pendingIntent),
-                    pendingIntent
-                )
+                alarmManager.setAlarmClock(AlarmManager.AlarmClockInfo(triggerTime, pendingIntent), pendingIntent)
             } else {
-                // 低版本兼容
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    triggerTime,
-                    pendingIntent
-                )
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
             }
-            Log.d("Scheduler", "Scheduled alarm for ${event.title} at $label")
         } catch (e: SecurityException) {
             Log.e("Scheduler", "Permission missing for exact alarm", e)
         }
@@ -98,17 +119,45 @@ object NotificationScheduler {
 
     fun cancelReminders(context: Context, event: MyEvent) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+        // 1. 取消定时闹钟
         event.reminders.forEach { minutesBefore ->
-            val intent = Intent(context, AlarmReceiver::class.java)
-            val requestCode = (event.id.hashCode() + minutesBefore).toInt()
-            val pendingIntent = PendingIntent.getBroadcast(
-                context, requestCode, intent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_NO_CREATE
-            )
-            if (pendingIntent != null) {
-                alarmManager.cancel(pendingIntent)
-                pendingIntent.cancel()
+            cancelPendingIntent(context, event.id.hashCode() + minutesBefore, alarmManager)
+        }
+        cancelPendingIntent(context, event.id.hashCode() + OFFSET_CAPSULE_START, alarmManager)
+        cancelPendingIntent(context, event.id.hashCode() + OFFSET_CAPSULE_END, alarmManager)
+
+        // 2. 【修复 Crash 的核心逻辑】
+        // 只有当 CapsuleService 明确处于运行状态时，才发送 STOP 指令。
+        if (CapsuleService.isServiceRunning) {
+            try {
+                val stopIntent = Intent(context, CapsuleService::class.java).apply {
+                    this.action = CapsuleService.ACTION_STOP
+                    putExtra("EVENT_ID", event.id)
+                }
+
+                // 既然服务在运行（即处于前台），使用普通的 startService 是安全且合规的。
+                // 这样避免了 startForegroundService 的 5 秒强制契约。
+                context.startService(stopIntent)
+
+                Log.d("Scheduler", "检测到服务运行中，已安全发送 STOP 命令: ${event.title}")
+            } catch (e: Exception) {
+                Log.e("Scheduler", "停止胶囊服务失败", e)
             }
+        } else {
+            Log.d("Scheduler", "服务未运行，跳过 STOP 命令: ${event.title}")
+        }
+    }
+
+    private fun cancelPendingIntent(context: Context, requestCode: Int, alarmManager: AlarmManager) {
+        val intent = Intent(context, AlarmReceiver::class.java)
+        val pendingIntent = PendingIntent.getBroadcast(
+            context, requestCode, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_NO_CREATE
+        )
+        if (pendingIntent != null) {
+            alarmManager.cancel(pendingIntent)
+            pendingIntent.cancel()
         }
     }
 }
