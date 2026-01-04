@@ -8,10 +8,10 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
-    <!-- 【新增 1/2】Flyme 实况通知状态读取权限 -->
     <uses-permission android:name="flyme.permission.READ_NOTIFICATION_LIVE_STATE" />
 
     <application
@@ -26,12 +26,10 @@
         android:theme="@style/Theme.CalendarAssistant"
         tools:targetApi="31">
 
-        <!-- 【新增 2/2】告诉 Flyme 系统此应用支持实况通知 -->
         <meta-data
             android:name="com.meizu.flyme.live_notification"
             android:value="true" />
 
-        <!-- 三星实况通知支持 -->
         <meta-data
             android:name="com.samsung.android.support.ongoing_activity"
             android:value="true" />
@@ -47,11 +45,15 @@
             </intent-filter>
         </activity>
 
+        <!-- 【核心修复】移除 foregroundServiceType -->
+        <!-- 无障碍服务不需要也不应该声明这个，除非它真的执行了 startForeground -->
         <service
             android:name=".service.TextAccessibilityService"
             android:exported="true"
             android:label="Calendar Assistant Service"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <!-- 删掉了 android:foregroundServiceType="specialUse" -->
+
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
@@ -59,6 +61,13 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- CapsuleService 依然保留 specialUse，因为它是纯正的前台服务 -->
+        <service
+            android:name=".service.CapsuleService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
 
         <service
             android:name=".service.CaptureTileService"

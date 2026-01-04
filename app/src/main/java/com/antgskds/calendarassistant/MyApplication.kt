@@ -1,6 +1,7 @@
 package com.antgskds.calendarassistant
 
 import android.app.Application
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
@@ -70,14 +71,19 @@ class MyApplication : Application() {
             }
             notificationManager.createNotificationChannel(channel)
 
-            // 2. 实时通知渠道
+            // 2. 实时通知渠道 (实况胶囊专用)
+            // 【修改】升级版本号 v3，防止系统缓存旧的配置
             val liveName = "实时状态通知"
-            val liveDesc = "显示取件码、排队号等实时信息"
-            // 使用 IMPORTANCE_DEFAULT 或 HIGH 即可，promoted 会处理胶囊
+            val liveDesc = "显示取件码、日程实况等信息"
+
+            // 必须 HIGH
             val liveChannel = NotificationChannel(CHANNEL_ID_LIVE, liveName, NotificationManager.IMPORTANCE_HIGH).apply {
                 description = liveDesc
-                enableVibration(false)
+                // 【欺骗系统】：开启震动但时长为0，防止被降级
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0L)
                 setSound(null, null)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
             notificationManager.createNotificationChannel(liveChannel)
         }
@@ -85,7 +91,8 @@ class MyApplication : Application() {
 
     companion object {
         const val CHANNEL_ID = "calendar_assistant_popup_channel_v2"
-        const val CHANNEL_ID_LIVE = "calendar_assistant_live_channel"
+        // 【修改】强制刷新渠道配置
+        const val CHANNEL_ID_LIVE = "calendar_assistant_live_channel_v3"
 
         @Volatile
         private var instance: MyApplication? = null
