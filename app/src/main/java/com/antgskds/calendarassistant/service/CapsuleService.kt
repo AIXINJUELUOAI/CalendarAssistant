@@ -21,14 +21,9 @@ import com.antgskds.calendarassistant.R
  * 实况胶囊前台服务 (CapsuleService)
  *
  * 核心职责：
- * 1. 作为一个正规的 [Service]，向系统申请 [startForeground] 权限，获取 Android 16 的信任。
- * 2. 维护一个 [activeNotifications] 集合，解决“多事件重叠”时的通知管理问题。
- *
- * 解决“通知卡死”的关键逻辑：
- * Android 的 Service 只能有一个 Notification 作为“前台锚点”。
- * 当有多个胶囊（A和B）同时存在时，如果 B 是当前的锚点，而 B 结束了：
- * 我们不能直接 cancel(B)，否则服务会失去锚点。
- * 我们必须先将锚点转移给 A (startForeground(A))，然后再 cancel(B)。
+ * 1. 作为一个正规的 [Service]，向系统申请 [startForeground] 权限。
+ * 2. 维护 [activeNotifications] 集合，解决“多事件重叠”时的通知管理问题。
+ * 3. [修复 Bug]: 即使存在普通通知，也要强制胶囊独立显示 (分组隔离 + 立即展示)。
  */
 class CapsuleService : Service() {
 
@@ -77,7 +72,6 @@ class CapsuleService : Service() {
 
         // 3. 抢占前台 (Promote to Foreground)
         // 无论是第一个还是第二个事件，最新的这个事件总是成为新的“前台锚点”。
-        // 这符合“后进先出”的视觉逻辑，也让最新的胶囊获得最高优先级。
         promoteToForeground(notificationId, notification)
     }
 
@@ -147,10 +141,6 @@ class CapsuleService : Service() {
 
     /**
      * 构建实况通知对象
-     * 完全对齐“快递通知”的成功参数：
-     * 1. 使用 mipmap 图标
-     * 2. 移除 setColorized
-     * 3. 强制反射调用 Android 16 API
      */
     private fun buildCapsuleNotification(
         notifId: Int,
@@ -196,6 +186,30 @@ class CapsuleService : Service() {
                 .setBigContentTitle(title)
                 .bigText(expandedContent)
             )
+
+        // ========================================================================
+        // 【新增 1】：强制立即展示 (针对 Android 12+ 前台服务延迟显示的策略)
+        // 作用：告诉系统这是一个急需展示的通知，即使 App 已经有其他通知，也不要折叠或延迟。
+        // ========================================================================
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+        }
+
+        // ========================================================================
+        // 【新增 2】：分组隔离策略
+        // 作用：指定一个特殊的 Group Key。
+        // 如果不设置，系统可能会将其与普通通知归为一类并折叠。设置独特 Group 可强制分离。
+        // ========================================================================
+        builder.setGroup("LIVE_CAPSULE_GROUP")
+        builder.setGroupSummary(false) // 明确这是个体，不是摘要
+
+        // ========================================================================
+        // 【新增 3】：时间戳更新
+        // 作用：刷新时间戳，确保其在排序逻辑中处于"最新"状态，避免被压在旧通知下。
+        // ========================================================================
+        builder.setWhen(System.currentTimeMillis())
+        builder.setShowWhen(true)
+        builder.setSortKey(System.currentTimeMillis().toString()) // 辅助排序
 
         // Android 16 (Baklava) 强制反射
         try {
