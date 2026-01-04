@@ -7,15 +7,25 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.ColorUtils
 import com.antgskds.calendarassistant.MainActivity
 import com.antgskds.calendarassistant.MyApplication
 import com.antgskds.calendarassistant.R
+import com.antgskds.calendarassistant.util.FlymeUtils
 
 /**
  * 实况胶囊前台服务 (CapsuleService)
@@ -24,11 +34,12 @@ import com.antgskds.calendarassistant.R
  * 1. 作为一个正规的 [Service]，向系统申请 [startForeground] 权限。
  * 2. 维护 [activeNotifications] 集合，解决“多事件重叠”时的通知管理问题。
  * 3. [修复 Bug]: 即使存在普通通知，也要强制胶囊独立显示 (分组隔离 + 立即展示)。
- * 4. [修复 Crash]: 维护 isServiceRunning 状态，防止外部在服务未启动时错误调用 startForegroundService 发送停止命令。
+ * 4. [修复 Crash]: 维护 isServiceRunning 状态。
+ * 5. [新增]: 适配魅族 Flyme 实况胶囊。
  */
 class CapsuleService : Service() {
 
-    // 存储当前活跃的通知对象：Map<NotificationId, Notification>
+    // 存储当前活跃的通知对象
     private val activeNotifications = mutableMapOf<Int, Notification>()
 
     // 记录当前哪一个 ID 是“前台锚点”
@@ -36,14 +47,12 @@ class CapsuleService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // 【新增 1】：维护服务运行状态
     override fun onCreate() {
         super.onCreate()
         isServiceRunning = true
         Log.d(TAG, "Service Created, isServiceRunning = true")
     }
 
-    // 【新增 2】：服务销毁时重置状态
     override fun onDestroy() {
         isServiceRunning = false
         Log.d(TAG, "Service Destroyed, isServiceRunning = false")
@@ -146,6 +155,7 @@ class CapsuleService : Service() {
             Notification.Builder(this)
         }
 
+        // 使用 mipmap 图标
         val icon = Icon.createWithResource(this, R.mipmap.ic_launcher)
 
         builder.setSmallIcon(icon)
@@ -172,6 +182,7 @@ class CapsuleService : Service() {
         builder.setShowWhen(true)
         builder.setSortKey(System.currentTimeMillis().toString())
 
+        // Android 16 (Baklava) 反射
         try {
             val methodSetText = Notification.Builder::class.java.getMethod("setShortCriticalText", String::class.java)
             methodSetText.invoke(builder, collapsedTitle)
@@ -181,6 +192,47 @@ class CapsuleService : Service() {
             val methodSetPromoted = Notification.Builder::class.java.getMethod("setRequestPromotedOngoing", Boolean::class.java)
             methodSetPromoted.invoke(builder, true)
         } catch (e: Exception) { /* ignore */ }
+
+        // ========================================================================
+        // 【新增】：魅族 Flyme 实况胶囊适配
+        // ========================================================================
+        if (FlymeUtils.isFlyme()) {
+            try {
+                // 准备图标 (将 mipmap/drawable 转为白色 Bitmap)
+                var iconDrawable = ContextCompat.getDrawable(this, R.drawable.ic_qs_recognition)
+                if (iconDrawable == null) iconDrawable = ContextCompat.getDrawable(this, R.mipmap.ic_launcher)
+
+                val iconBitmap = iconDrawable?.let { drawableToBitmap(it) }?.let {
+                    tintBitmap(it, Color.WHITE)
+                }
+                val iconObj = if (iconBitmap != null) Icon.createWithBitmap(iconBitmap) else null
+
+                // 胶囊参数
+                val capsuleBundle = Bundle().apply {
+                    putInt("notification.live.capsuleStatus", 1)
+                    putInt("notification.live.capsuleType", 1)
+                    putString("notification.live.capsuleContent", collapsedTitle)
+                    if (iconObj != null) {
+                        putParcelable("notification.live.capsuleIcon", iconObj)
+                    }
+                    putInt("notification.live.capsuleBgColor", capsuleColor)
+                    putInt("notification.live.capsuleContentColor", Color.WHITE)
+                }
+
+                // 外部 Bundle
+                val liveBundle = Bundle().apply {
+                    putBoolean("is_live", true)
+                    putInt("notification.live.operation", 0)
+                    putInt("notification.live.type", 10)
+                    putBundle("notification.live.capsule", capsuleBundle)
+                    putInt("notification.live.contentColor", Color.BLACK)
+                }
+
+                builder.addExtras(liveBundle)
+            } catch (e: Exception) {
+                Log.e(TAG, "Flyme 适配异常", e)
+            }
+        }
 
         val extras = Bundle()
         extras.putBoolean("android.substName", true)
@@ -192,12 +244,36 @@ class CapsuleService : Service() {
         return builder.build()
     }
 
+    // =========================================
+    // 辅助方法：处理图标颜色
+    // =========================================
+    private fun drawableToBitmap(drawable: Drawable): Bitmap {
+        if (drawable is BitmapDrawable) return drawable.bitmap
+        val bitmap = Bitmap.createBitmap(
+            drawable.intrinsicWidth.coerceAtLeast(1),
+            drawable.intrinsicHeight.coerceAtLeast(1),
+            Bitmap.Config.ARGB_8888
+        )
+        val canvas = Canvas(bitmap)
+        drawable.setBounds(0, 0, canvas.width, canvas.height)
+        drawable.draw(canvas)
+        return bitmap
+    }
+
+    private fun tintBitmap(source: Bitmap, color: Int): Bitmap {
+        val bitmap = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val paint = Paint().apply {
+            colorFilter = PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN)
+        }
+        canvas.drawBitmap(source, 0f, 0f, paint)
+        return bitmap
+    }
+
     companion object {
         const val TAG = "CapsuleService"
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
-
-        // 【新增 3】：全局标志位，供外部查询服务是否存活
         @Volatile
         var isServiceRunning = false
     }
