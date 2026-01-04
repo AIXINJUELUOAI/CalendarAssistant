@@ -158,6 +158,7 @@ class TextAccessibilityService : AccessibilityService() {
             if (validEvents.isNotEmpty()) {
                 val (pickupEvents, normalEvents) = validEvents.partition { it.type == "pickup" }
 
+                // 【注意】：saveEventsLocally 现在是 suspend 函数，需要 await 执行完毕
                 val addedNormalEvents = if (normalEvents.isNotEmpty()) {
                     saveEventsLocally(normalEvents, imageFile.absolutePath)
                 } else emptyList()
@@ -178,7 +179,7 @@ class TextAccessibilityService : AccessibilityService() {
                             val titleText = "$baseText$alarmText$filterText"
                             showNotification(titleText, titles, isProgress = false, autoLaunch = false)
 
-                            // 立即检查是否需要启动实况胶囊 (已内部包含开关检查)
+                            // 立即检查是否需要启动实况胶囊
                             checkAndStartCapsuleImmediate(addedNormalEvents)
 
                         } else {
@@ -239,7 +240,6 @@ class TextAccessibilityService : AccessibilityService() {
      */
     private fun checkAndStartCapsuleImmediate(events: List<MyEvent>) {
         val settings = MyApplication.getInstance().getSettings()
-        // 【关键逻辑】：尊重用户意愿。如果开关关闭，坚决不启动胶囊。
         if (!settings.isLiveCapsuleEnabled) return
 
         val now = LocalDateTime.now()
@@ -250,7 +250,6 @@ class TextAccessibilityService : AccessibilityService() {
                 val startDateTime = LocalDateTime.parse("${event.startDate} ${event.startTime}", formatter)
                 val endDateTime = LocalDateTime.parse("${event.endDate} ${event.endTime}", formatter)
 
-                // 判定：如果 (现在 >= 开始) 且 (现在 < 结束)
                 if ((now.isEqual(startDateTime) || now.isAfter(startDateTime)) && now.isBefore(endDateTime)) {
                     Log.d(TAG, "检测到即时日程: ${event.title}，立即启动胶囊")
 
@@ -275,7 +274,11 @@ class TextAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun saveEventsLocally(aiEvents: List<CalendarEventData>, imagePath: String): List<MyEvent> {
+    /**
+     * 保存日程并设置闹钟
+     * 【修改】: 变更为 suspend 函数，以支持 delay
+     */
+    private suspend fun saveEventsLocally(aiEvents: List<CalendarEventData>, imagePath: String): List<MyEvent> {
         val actuallyAdded = mutableListOf<MyEvent>()
         try {
             val app = MyApplication.getInstance()
@@ -335,7 +338,14 @@ class TextAccessibilityService : AccessibilityService() {
                     NotificationScheduler.scheduleReminders(this, newEvent)
 
                     if (shouldAutoAlarm && finalEventType == "event") {
-                        createSystemAlarm(newEvent.title, startDateTime.hour, startDateTime.minute, startDateTime.toLocalDate())
+                        // 【修改 1】：只有未来日程才设置系统闹钟
+                        if (startDateTime.isAfter(LocalDateTime.now())) {
+                            createSystemAlarm(newEvent.title, startDateTime.hour, startDateTime.minute, startDateTime.toLocalDate())
+                            // 【修改 2】：增加 1 秒延迟，防止并发 Intent 丢失
+                            delay(1000)
+                        } else {
+                            Log.d(TAG, "跳过过期日程的系统闹钟设置: ${newEvent.title} ($startDateTime)")
+                        }
                     }
                 }
             }
@@ -413,11 +423,6 @@ class TextAccessibilityService : AccessibilityService() {
         if (autoLaunch) startActivity(intent)
     }
 
-    // =========================================================================
-    // 【恢复】取件码实况通知核心逻辑
-    // 以及辅助方法 (drawableToBitmap, tintBitmap 等)
-    // =========================================================================
-
     private fun postLiveUpdateSafely(chipText: String, title: String, content: String) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -440,11 +445,9 @@ class TextAccessibilityService : AccessibilityService() {
             Color.parseColor("#00C853")
         }
 
-        // 【新增检查】：在发送取件码胶囊前，先检查用户是否开启了胶囊设置
+        // 检查用户开关
         val settings = MyApplication.getInstance().getSettings()
         if (!settings.isLiveCapsuleEnabled) {
-            // 如果用户关闭了胶囊，则降级为普通样式（带颜色、常驻）的通知
-            // 避免反射调用实况 API
             postCompatSamsungNotification(manager, title, content, pendingIntent, capsuleColor)
             return
         }
@@ -457,7 +460,6 @@ class TextAccessibilityService : AccessibilityService() {
                 sendPermissionGuidanceNotification()
                 return
             }
-            // 【关键修改】使用对齐过的增强版方法
             postNativeBaklavaNotification(manager, chipText, title, content, pendingIntent, capsuleColor)
         }
         else {
@@ -551,7 +553,6 @@ class TextAccessibilityService : AccessibilityService() {
         color: Int
     ) {
         try {
-            // 【核心对齐】使用 mipmap 图标
             val icon = Icon.createWithResource(this, R.mipmap.ic_launcher)
 
             val builder = Notification.Builder(this, MyApplication.CHANNEL_ID_LIVE)
@@ -562,15 +563,9 @@ class TextAccessibilityService : AccessibilityService() {
                 .setOngoing(true)
                 .setStyle(Notification.BigTextStyle().bigText(content))
                 .setColor(color)
-
-                // 【核心对齐】移除 setColorized(true)
-                // .setColorized(true) <--- 移除
-
-                // 【核心对齐】设置 Category 和 Visibility
                 .setCategory(Notification.CATEGORY_EVENT)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
 
-            // 强制反射
             try {
                 val methodSetText = Notification.Builder::class.java.getMethod("setShortCriticalText", String::class.java)
                 methodSetText.invoke(builder, critText)
@@ -581,10 +576,9 @@ class TextAccessibilityService : AccessibilityService() {
                 methodSetPromoted.invoke(builder, true)
             } catch (e: Exception) { /* ignore */ }
 
-            // 兼容性 Extra
             val extras = Bundle()
             extras.putBoolean("android.substName", true)
-            extras.putString("android.title", critText) // 使用简短文本作为标题
+            extras.putString("android.title", critText)
             builder.addExtras(extras)
 
             builder.setOnlyAlertOnce(true)
