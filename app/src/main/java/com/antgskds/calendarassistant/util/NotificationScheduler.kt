@@ -8,6 +8,7 @@ import android.os.Build
 import android.util.Log
 import com.antgskds.calendarassistant.MyEvent
 import com.antgskds.calendarassistant.receiver.AlarmReceiver
+import com.antgskds.calendarassistant.service.CapsuleService
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -15,6 +16,7 @@ import java.time.format.DateTimeFormatter
 object NotificationScheduler {
 
     val REMINDER_OPTIONS = listOf(
+        0 to "日程开始时",
         5 to "5分钟前",
         10 to "10分钟前",
         15 to "15分钟前",
@@ -26,12 +28,10 @@ object NotificationScheduler {
         2880 to "2天前"
     )
 
-    // 常量定义：区分 Intent 类型
     const val ACTION_REMINDER = "ACTION_REMINDER"
     const val ACTION_CAPSULE_START = "ACTION_CAPSULE_START"
     const val ACTION_CAPSULE_END = "ACTION_CAPSULE_END"
 
-    // ID 偏移量
     private const val OFFSET_CAPSULE_START = 100000
     private const val OFFSET_CAPSULE_END = 200000
 
@@ -50,7 +50,6 @@ object NotificationScheduler {
         val startMillis = startDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val endMillis = endDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
 
-        // 1. 普通提醒 (保持原样)
         event.reminders.forEach { minutesBefore ->
             val triggerTime = startMillis - (minutesBefore * 60 * 1000)
             if (triggerTime > System.currentTimeMillis()) {
@@ -62,7 +61,6 @@ object NotificationScheduler {
             }
         }
 
-        // 2. 强制调度实况胶囊 Start 和 End
         if (startMillis > System.currentTimeMillis()) {
             scheduleCapsuleAlarm(context, event, startMillis, ACTION_CAPSULE_START, alarmManager)
         }
@@ -121,11 +119,34 @@ object NotificationScheduler {
 
     fun cancelReminders(context: Context, event: MyEvent) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+        // 1. 取消定时闹钟
         event.reminders.forEach { minutesBefore ->
             cancelPendingIntent(context, event.id.hashCode() + minutesBefore, alarmManager)
         }
         cancelPendingIntent(context, event.id.hashCode() + OFFSET_CAPSULE_START, alarmManager)
         cancelPendingIntent(context, event.id.hashCode() + OFFSET_CAPSULE_END, alarmManager)
+
+        // 2. 【修复 Crash 的核心逻辑】
+        // 只有当 CapsuleService 明确处于运行状态时，才发送 STOP 指令。
+        if (CapsuleService.isServiceRunning) {
+            try {
+                val stopIntent = Intent(context, CapsuleService::class.java).apply {
+                    this.action = CapsuleService.ACTION_STOP
+                    putExtra("EVENT_ID", event.id)
+                }
+
+                // 既然服务在运行（即处于前台），使用普通的 startService 是安全且合规的。
+                // 这样避免了 startForegroundService 的 5 秒强制契约。
+                context.startService(stopIntent)
+
+                Log.d("Scheduler", "检测到服务运行中，已安全发送 STOP 命令: ${event.title}")
+            } catch (e: Exception) {
+                Log.e("Scheduler", "停止胶囊服务失败", e)
+            }
+        } else {
+            Log.d("Scheduler", "服务未运行，跳过 STOP 命令: ${event.title}")
+        }
     }
 
     private fun cancelPendingIntent(context: Context, requestCode: Int, alarmManager: AlarmManager) {

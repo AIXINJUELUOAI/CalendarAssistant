@@ -24,11 +24,11 @@ import com.antgskds.calendarassistant.R
  * 1. 作为一个正规的 [Service]，向系统申请 [startForeground] 权限。
  * 2. 维护 [activeNotifications] 集合，解决“多事件重叠”时的通知管理问题。
  * 3. [修复 Bug]: 即使存在普通通知，也要强制胶囊独立显示 (分组隔离 + 立即展示)。
+ * 4. [修复 Crash]: 维护 isServiceRunning 状态，防止外部在服务未启动时错误调用 startForegroundService 发送停止命令。
  */
 class CapsuleService : Service() {
 
     // 存储当前活跃的通知对象：Map<NotificationId, Notification>
-    // 作用：当需要转移前台锚点时，我们可以从这里取出旧的 Notification 对象重新绑定
     private val activeNotifications = mutableMapOf<Int, Notification>()
 
     // 记录当前哪一个 ID 是“前台锚点”
@@ -36,14 +36,26 @@ class CapsuleService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    // 【新增 1】：维护服务运行状态
+    override fun onCreate() {
+        super.onCreate()
+        isServiceRunning = true
+        Log.d(TAG, "Service Created, isServiceRunning = true")
+    }
+
+    // 【新增 2】：服务销毁时重置状态
+    override fun onDestroy() {
+        isServiceRunning = false
+        Log.d(TAG, "Service Destroyed, isServiceRunning = false")
+        super.onDestroy()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
-        // 获取 Event ID。如果为空则无法处理，直接忽略。
         val eventIdStr = intent?.getStringExtra("EVENT_ID") ?: ""
 
         if (eventIdStr.isEmpty()) return START_NOT_STICKY
 
-        // 使用 HashCode 作为唯一 ID，与 AlarmReceiver 保持一致
         val notificationId = eventIdStr.hashCode()
 
         if (action == ACTION_START) {
@@ -55,42 +67,23 @@ class CapsuleService : Service() {
         return START_NOT_STICKY
     }
 
-    /**
-     * 处理 [ACTION_START]：显示胶囊
-     */
     private fun handleStart(intent: Intent?, notificationId: Int) {
         val title = intent?.getStringExtra("EVENT_TITLE") ?: "日程进行中"
         val location = intent?.getStringExtra("EVENT_LOCATION") ?: ""
         val startTime = intent?.getStringExtra("EVENT_START_TIME") ?: ""
         val endTime = intent?.getStringExtra("EVENT_END_TIME") ?: ""
 
-        // 1. 构建 Notification 对象
         val notification = buildCapsuleNotification(notificationId, title, location, startTime, endTime)
-
-        // 2. 存入 Map，作为“资产”备份
         activeNotifications[notificationId] = notification
-
-        // 3. 抢占前台 (Promote to Foreground)
-        // 无论是第一个还是第二个事件，最新的这个事件总是成为新的“前台锚点”。
         promoteToForeground(notificationId, notification)
     }
 
-    /**
-     * 处理 [ACTION_STOP]：撤销胶囊
-     */
     private fun handleStop(notificationId: Int) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-        // 1. 从资产 Map 中移除
         activeNotifications.remove(notificationId)
 
-        // 2. 检查：我们正在移除的这个 ID，是不是当前撑着服务的“锚点”？
         if (notificationId == currentForegroundId) {
-            // 糟糕，我们要移除锚点了。
             if (activeNotifications.isNotEmpty()) {
-                // 情况 A：还有其他胶囊（例如事件1还在进行）。
-                // 战术：找一个“替补”上位。
-                // 我们取 Map 中剩下的最后一个（通常是上一个事件），让它重新成为前台。
                 val nextAnchorId = activeNotifications.keys.last()
                 val nextNotification = activeNotifications[nextAnchorId]
 
@@ -98,50 +91,34 @@ class CapsuleService : Service() {
                     Log.d(TAG, "锚点转移: $currentForegroundId -> $nextAnchorId")
                     promoteToForeground(nextAnchorId, nextNotification)
                 }
-
-                // 转移成功后，现在可以安全地 Cancel 掉旧的 ID 了
                 manager.cancel(notificationId)
             } else {
-                // 情况 B：没有其他胶囊了。
-                // 战术：直接停止服务。
-                // stopForeground(true) 会自动移除当前的 Notification，所以不需要手动 cancel。
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 Log.d(TAG, "所有胶囊已结束，服务停止")
             }
         } else {
-            // 情况 C：我们移除的只是一个普通的胶囊，不是锚点。
-            // 直接 Cancel 即可，不影响服务存活。
             manager.cancel(notificationId)
             Log.d(TAG, "移除普通胶囊: $notificationId")
         }
     }
 
-    /**
-     * 将指定 ID 提升为前台锚点
-     */
     private fun promoteToForeground(id: Int, notification: Notification) {
         try {
             if (Build.VERSION.SDK_INT >= 34) {
-                // Android 14+ 必须声明类型
                 startForeground(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             } else {
                 startForeground(id, notification)
             }
-            // 更新记录
             currentForegroundId = id
             Log.d(TAG, "startForeground 成功, 锚点ID: $id")
         } catch (e: Exception) {
             Log.e(TAG, "startForeground 失败", e)
-            // 补救措施：如果前台启动失败，至少尝试发个普通通知
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.notify(id, notification)
         }
     }
 
-    /**
-     * 构建实况通知对象
-     */
     private fun buildCapsuleNotification(
         notifId: Int,
         title: String,
@@ -169,7 +146,6 @@ class CapsuleService : Service() {
             Notification.Builder(this)
         }
 
-        // 图标：使用 mipmap，对齐成功案例
         val icon = Icon.createWithResource(this, R.mipmap.ic_launcher)
 
         builder.setSmallIcon(icon)
@@ -179,7 +155,6 @@ class CapsuleService : Service() {
             .setOngoing(true)
             .setAutoCancel(false)
             .setColor(capsuleColor)
-            // 关键：不要设置 setColorized(true)，防止被系统误判为 MediaStyle 而拒绝胶囊化
             .setCategory(Notification.CATEGORY_EVENT)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setStyle(Notification.BigTextStyle()
@@ -187,31 +162,16 @@ class CapsuleService : Service() {
                 .bigText(expandedContent)
             )
 
-        // ========================================================================
-        // 【新增 1】：强制立即展示 (针对 Android 12+ 前台服务延迟显示的策略)
-        // 作用：告诉系统这是一个急需展示的通知，即使 App 已经有其他通知，也不要折叠或延迟。
-        // ========================================================================
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
         }
 
-        // ========================================================================
-        // 【新增 2】：分组隔离策略
-        // 作用：指定一个特殊的 Group Key。
-        // 如果不设置，系统可能会将其与普通通知归为一类并折叠。设置独特 Group 可强制分离。
-        // ========================================================================
         builder.setGroup("LIVE_CAPSULE_GROUP")
-        builder.setGroupSummary(false) // 明确这是个体，不是摘要
-
-        // ========================================================================
-        // 【新增 3】：时间戳更新
-        // 作用：刷新时间戳，确保其在排序逻辑中处于"最新"状态，避免被压在旧通知下。
-        // ========================================================================
+        builder.setGroupSummary(false)
         builder.setWhen(System.currentTimeMillis())
         builder.setShowWhen(true)
-        builder.setSortKey(System.currentTimeMillis().toString()) // 辅助排序
+        builder.setSortKey(System.currentTimeMillis().toString())
 
-        // Android 16 (Baklava) 强制反射
         try {
             val methodSetText = Notification.Builder::class.java.getMethod("setShortCriticalText", String::class.java)
             methodSetText.invoke(builder, collapsedTitle)
@@ -222,7 +182,6 @@ class CapsuleService : Service() {
             methodSetPromoted.invoke(builder, true)
         } catch (e: Exception) { /* ignore */ }
 
-        // 兼容性 Extras
         val extras = Bundle()
         extras.putBoolean("android.substName", true)
         extras.putString("android.title", collapsedTitle)
@@ -237,5 +196,9 @@ class CapsuleService : Service() {
         const val TAG = "CapsuleService"
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
+
+        // 【新增 3】：全局标志位，供外部查询服务是否存活
+        @Volatile
+        var isServiceRunning = false
     }
 }

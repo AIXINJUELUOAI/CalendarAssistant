@@ -35,6 +35,7 @@ import com.antgskds.calendarassistant.getNextColor
 import com.antgskds.calendarassistant.llm.RecognitionProcessor
 import com.antgskds.calendarassistant.model.CalendarEventData
 import com.antgskds.calendarassistant.util.FlymeUtils
+import com.antgskds.calendarassistant.util.NotificationScheduler
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileOutputStream
@@ -176,12 +177,16 @@ class TextAccessibilityService : AccessibilityService() {
                             val filterText = if (duplicateCount > 0) " (已过滤 ${duplicateCount} 条重复)" else ""
                             val titleText = "$baseText$alarmText$filterText"
                             showNotification(titleText, titles, isProgress = false, autoLaunch = false)
+
+                            // 立即检查是否需要启动实况胶囊 (已内部包含开关检查)
+                            checkAndStartCapsuleImmediate(addedNormalEvents)
+
                         } else {
                             showNotification("无新增日程", "识别到 ${normalEvents.size} 条记录均为重复项", isProgress = false, autoLaunch = false)
                         }
                     }
 
-                    // 2. 取件码实况通知 (恢复了这段逻辑)
+                    // 2. 取件码实况通知
                     if (pickupEvents.isNotEmpty()) {
                         if (addedPickupEvents.isNotEmpty()) {
                             val count = addedPickupEvents.size
@@ -225,6 +230,47 @@ class TextAccessibilityService : AccessibilityService() {
             Log.e("TextAccessDebug", "Error in processScreenshot", e)
             withContext(Dispatchers.Main) {
                 showNotification("分析出错", "错误信息: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 检查并立即启动胶囊 (针对普通日程)
+     */
+    private fun checkAndStartCapsuleImmediate(events: List<MyEvent>) {
+        val settings = MyApplication.getInstance().getSettings()
+        // 【关键逻辑】：尊重用户意愿。如果开关关闭，坚决不启动胶囊。
+        if (!settings.isLiveCapsuleEnabled) return
+
+        val now = LocalDateTime.now()
+        val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+
+        events.forEach { event ->
+            try {
+                val startDateTime = LocalDateTime.parse("${event.startDate} ${event.startTime}", formatter)
+                val endDateTime = LocalDateTime.parse("${event.endDate} ${event.endTime}", formatter)
+
+                // 判定：如果 (现在 >= 开始) 且 (现在 < 结束)
+                if ((now.isEqual(startDateTime) || now.isAfter(startDateTime)) && now.isBefore(endDateTime)) {
+                    Log.d(TAG, "检测到即时日程: ${event.title}，立即启动胶囊")
+
+                    val serviceIntent = Intent(this, CapsuleService::class.java).apply {
+                        this.action = CapsuleService.ACTION_START
+                        putExtra("EVENT_ID", event.id)
+                        putExtra("EVENT_TITLE", event.title)
+                        putExtra("EVENT_LOCATION", event.location)
+                        putExtra("EVENT_START_TIME", event.startTime)
+                        putExtra("EVENT_END_TIME", event.endTime)
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(serviceIntent)
+                    } else {
+                        startService(serviceIntent)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "解析时间失败，跳过即时胶囊检查", e)
             }
         }
     }
@@ -285,6 +331,8 @@ class TextAccessibilityService : AccessibilityService() {
                     )
                     currentEvents.add(newEvent)
                     actuallyAdded.add(newEvent)
+
+                    NotificationScheduler.scheduleReminders(this, newEvent)
 
                     if (shouldAutoAlarm && finalEventType == "event") {
                         createSystemAlarm(newEvent.title, startDateTime.hour, startDateTime.minute, startDateTime.toLocalDate())
@@ -390,6 +438,15 @@ class TextAccessibilityService : AccessibilityService() {
             Color.parseColor("#2196F3")
         } else {
             Color.parseColor("#00C853")
+        }
+
+        // 【新增检查】：在发送取件码胶囊前，先检查用户是否开启了胶囊设置
+        val settings = MyApplication.getInstance().getSettings()
+        if (!settings.isLiveCapsuleEnabled) {
+            // 如果用户关闭了胶囊，则降级为普通样式（带颜色、常驻）的通知
+            // 避免反射调用实况 API
+            postCompatSamsungNotification(manager, title, content, pendingIntent, capsuleColor)
+            return
         }
 
         if (FlymeUtils.isLiveNotificationEnabled(this) || TEST_FLYME_LOGIC) {
