@@ -31,6 +31,94 @@ object RecognitionProcessor {
         TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
     }
 
+    // --- 新增：处理自然语言文本输入 (带详细日志) ---
+    suspend fun parseUserText(text: String): CalendarEventData? {
+        val now = LocalDateTime.now()
+        val dtfFull = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm EEEE")
+        val timeStr = now.format(dtfFull)
+
+        // 1. 构建 Prompt
+        val prompt = """
+            你是一个日程助手。
+            【当前系统时间】：$timeStr
+            
+            任务：从用户的自然语言描述中提取日程信息。
+            
+            【规则】
+            1. 根据当前时间推断相对时间（如“明天”、“下周三”）。
+            2. 提取标题、时间、地点、备注。
+            3. 如果用户没有说明结束时间，默认持续1小时。
+            4. 如果内容包含取件码/验证码，type 设置为 "pickup"，否则为 "event"。
+            
+            【输出格式】
+            纯 JSON 对象 (不要 Markdown，不要 ```json 包裹)：
+            {
+               "title": "简短标题",
+               "startTime": "yyyy-MM-dd HH:mm",
+               "endTime": "yyyy-MM-dd HH:mm",
+               "location": "地点(可选)",
+               "description": "备注或原文",
+               "type": "event 或 pickup"
+            }
+        """.trimIndent()
+
+        // --- 【LOG】输出输入信息 ---
+        Log.d(TAG, "========== [AI 自然语言输入开始] ==========")
+        Log.d(TAG, "用户输入: $text")
+        Log.d(TAG, "参考时间: $timeStr")
+        // 如果需要调试 Prompt，可以取消下面这行的注释
+        // Log.d(TAG, "完整 Prompt:\n$prompt")
+
+        val settings = MyApplication.getInstance().getSettings()
+        val modelName = settings.modelName.ifBlank { "deepseek-chat" }
+
+        val request = ModelRequest(
+            model = modelName,
+            messages = listOf(
+                ModelMessage("system", prompt),
+                ModelMessage("user", text)
+            ),
+            temperature = 0.3
+        )
+
+        return try {
+            Log.d(TAG, "正在请求模型: $modelName ...")
+
+            // 2. 发起请求
+            val response = ApiModelProvider.generate(request)
+
+            // --- 【LOG】输出原始响应 ---
+            Log.d(TAG, "AI 原始响应: $response")
+
+            // 检查 API 错误
+            if (response.startsWith("Error:")) {
+                Log.e(TAG, "API 返回错误: $response")
+                return null
+            }
+
+            // 3. 清洗 JSON
+            var cleanJson = response.trim()
+            if (cleanJson.contains("```")) {
+                cleanJson = cleanJson.substringAfter("json").substringAfter("\n").substringBeforeLast("```")
+            }
+
+            // --- 【LOG】输出清洗后的 JSON ---
+            Log.d(TAG, "准备解析 JSON: $cleanJson")
+
+            // 4. 解析对象
+            val result = jsonParser.decodeFromString<CalendarEventData>(cleanJson)
+
+            Log.d(TAG, "解析成功! 标题: [${result.title}], 时间: [${result.startTime}]")
+            Log.d(TAG, "========== [AI 自然语言输入结束] ==========")
+
+            result
+
+        } catch (e: Exception) {
+            Log.e(TAG, "AI 解析过程发生异常", e)
+            null
+        }
+    }
+
     suspend fun analyzeImage(bitmap: Bitmap): List<CalendarEventData> {
         val context = MyApplication.getInstance()
 
@@ -63,12 +151,8 @@ object RecognitionProcessor {
         val settings = context.getSettings()
         val modelName = settings.modelName.ifBlank { "deepseek-chat" }
 
-        // --- 新增：读取用户的时间偏好 ---
         val useRecTimeForTemp = settings.tempEventsUseRecognitionTime
 
-        // =================================================================================
-        // 原有 Prompt 1：普通日程提取 (完整保留，一字未删，保证日期逻辑稳定性)
-        // =================================================================================
         val itemSchema = JSONObject().apply {
             put("title", "日程标题")
             put("startTime", "格式 yyyy-MM-dd HH:mm")
@@ -95,6 +179,11 @@ object RecognitionProcessor {
                - 内容说 "今天晚上" = 基准日 (不是系统时间!)
                - 内容说 "明晚" = 基准日 + 1天
                - 内容说 "后天" = 基准日 + 2天
+               
+            3. **【绝对邻近原则 & 纯时间判定 - 优先级最高】**：
+               - 必须以**物理距离最近**（紧挨着消息内容上方）的那一行时间戳为准。
+               - **严禁**跳过紧邻的纯时间戳（如"08:30"）去参考更上面、更远的带日期时间戳（如"昨天 13:40"）。距离越近，权重绝对越高。
+               - **默认规则**：如果最近的时间戳只是 "HH:mm"（无“昨天”、“星期几”等前缀），它**绝对代表今天**（${'$'}dateToday）。
             
             【输出格式】
             纯 JSON 对象：
@@ -104,13 +193,7 @@ object RecognitionProcessor {
             }
         """.trimIndent()
 
-        // =================================================================================
-        // 修改 Prompt 2：取件码提取 (动态注入时间规则)
-        // =================================================================================
-
-        // --- 新增：根据设置生成不同的时间指令 ---
         val tempTimeInstruction = if (useRecTimeForTemp) {
-            // 选项A：强制使用系统时间
             """
             5. **时间设定强制规则**：
                - 必须忽略文本中的时间信息。
@@ -118,7 +201,6 @@ object RecognitionProcessor {
                - "endTime" 必须填入当前时间后推1小时：${now.plusHours(1).format(dtfTime)}
             """.trimIndent()
         } else {
-            // 选项B：智能提取时间
             """
             5. **时间设定智能规则**：
                - 优先在文本中寻找事件发生的具体时间（例如："14:30已存柜"、"请在22:00前取件"、"下单时间 11:45"）。
@@ -143,7 +225,6 @@ object RecognitionProcessor {
                - 取餐码可能包含字母（例如 "A112" 或 "B34"）。
                - **严禁**将字母 "L" 自动纠错为数字 "1"。
                - **严禁**将字母 "O" 自动纠错为数字 "0"。
-               - 必须按 OCR 看到的原始内容提取，保留连字符和字母。
             4. 如果没有相关代码，返回空列表。
             $tempTimeInstruction
             
@@ -163,9 +244,6 @@ object RecognitionProcessor {
             }
         """.trimIndent()
 
-        // =================================================================================
-        // 核心修改：使用“强制锚定词”+“物理分隔”策略，融合以上两段 Prompt
-        // =================================================================================
         val unifiedPrompt = """
             【强制模式选择指令 - 先读此指令再处理】
             你必须严格按以下规则选择处理模式，绝不允许混合、误判或参考非选中模式的内容：
@@ -176,8 +254,6 @@ object RecognitionProcessor {
                
             2. 如果上述锚定词一个都没有：
                - → 强制使用【模式A】，**完全跳过、不读取、不参考模式B的任何内容**
-
-            【重要】选择后，另一个模式的内容对你来说是无效文本，如同不存在！你仅能读取、执行选中模式的内容。
 
             【当前系统时间】：$timeStr
             （下面两个模式完整保留，你只看选中的那个）
@@ -204,12 +280,10 @@ object RecognitionProcessor {
             [OCR文本结束]
         """.trimIndent()
 
-        // --- 执行单次 AI 请求 ---
         return try {
-            Log.d(TAG, "正在请求 AI (合并模式)...")
             val request = ModelRequest(
                 model = modelName,
-                temperature = 0.1, // 保持低温，确保严格遵循锚定词指令
+                temperature = 0.1,
                 messages = listOf(
                     ModelMessage("system", unifiedPrompt),
                     ModelMessage("user", userPrompt)
@@ -238,7 +312,6 @@ object RecognitionProcessor {
             Log.d(TAG, "AI 原始响应: $cleanJson")
 
             val rootObject = JSONObject(cleanJson)
-            // 记录推理过程（如果模式B触发，这里会显示"识别到取件/取餐/快递信息"）
             if (rootObject.has("reasoning")) {
                 Log.d(TAG, "[$debugTag] 推理: ${rootObject.getString("reasoning")}")
             }

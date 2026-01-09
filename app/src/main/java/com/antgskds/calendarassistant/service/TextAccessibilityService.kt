@@ -29,11 +29,11 @@ import androidx.core.graphics.ColorUtils
 import com.antgskds.calendarassistant.EventJsonStore
 import com.antgskds.calendarassistant.MainActivity
 import com.antgskds.calendarassistant.MyApplication
-import com.antgskds.calendarassistant.MyEvent
 import com.antgskds.calendarassistant.R
 import com.antgskds.calendarassistant.getNextColor
 import com.antgskds.calendarassistant.llm.RecognitionProcessor
 import com.antgskds.calendarassistant.model.CalendarEventData
+import com.antgskds.calendarassistant.model.MyEvent // 【修复】导入 MyEvent
 import com.antgskds.calendarassistant.util.FlymeUtils
 import com.antgskds.calendarassistant.util.NotificationScheduler
 import kotlinx.coroutines.*

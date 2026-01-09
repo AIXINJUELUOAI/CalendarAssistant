@@ -1,5 +1,3 @@
-// --- FILE: com/antgskds/calendarassistant/receiver/DailySummaryReceiver.kt ---
-
 package com.antgskds.calendarassistant.receiver
 
 import android.app.AlarmManager
@@ -14,7 +12,8 @@ import androidx.core.app.NotificationCompat
 import com.antgskds.calendarassistant.EventJsonStore
 import com.antgskds.calendarassistant.MainActivity
 import com.antgskds.calendarassistant.MyApplication
-import com.antgskds.calendarassistant.R
+import com.antgskds.calendarassistant.R // 【修复1】导入 R
+import com.antgskds.calendarassistant.model.MyEvent // 【修复2】导入 MyEvent
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime

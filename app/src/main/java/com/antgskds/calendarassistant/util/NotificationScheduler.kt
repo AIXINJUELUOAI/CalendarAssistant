@@ -6,7 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
-import com.antgskds.calendarassistant.MyEvent
+import com.antgskds.calendarassistant.model.MyEvent
 import com.antgskds.calendarassistant.receiver.AlarmReceiver
 import com.antgskds.calendarassistant.service.CapsuleService
 import java.time.LocalDateTime

@@ -12,27 +12,29 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.pager.VerticalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
@@ -42,46 +44,59 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
-import com.antgskds.calendarassistant.receiver.DailySummaryScheduler
+import androidx.lifecycle.lifecycleScope
+import com.antgskds.calendarassistant.llm.RecognitionProcessor
+import com.antgskds.calendarassistant.model.Course
+import com.antgskds.calendarassistant.model.MyEvent
+import com.antgskds.calendarassistant.model.MySettings
 import com.antgskds.calendarassistant.service.TextAccessibilityService
-import com.antgskds.calendarassistant.util.NotificationScheduler
+import com.antgskds.calendarassistant.ui.CourseManagementDialog
+import com.antgskds.calendarassistant.ui.ModelSettingsGroup
+import com.antgskds.calendarassistant.ui.PreferenceSettingsGroup
+import com.antgskds.calendarassistant.ui.ScheduleSettingsSidebar
+import com.antgskds.calendarassistant.ui.ScheduleView
+import com.antgskds.calendarassistant.ui.TimeTableEditorDialog
+import com.antgskds.calendarassistant.ui.WheelDatePickerDialog
+import com.antgskds.calendarassistant.ui.WheelReminderPickerDialog
+import com.antgskds.calendarassistant.ui.WheelTimePickerDialog
 import com.antgskds.calendarassistant.ui.theme.CalendarAssistantTheme
+import com.antgskds.calendarassistant.util.NotificationScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.KSerializer
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.descriptors.PrimitiveKind
-import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
-import kotlinx.serialization.descriptors.SerialDescriptor
-import kotlinx.serialization.encoding.Decoder
-import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
-import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
-import java.util.*
+import java.util.Locale
+import java.util.UUID
 import kotlin.math.roundToInt
+
 
 // --- 工具函数与常量 ---
 
@@ -112,7 +127,6 @@ fun getLunarDate(date: LocalDate): String {
 // 辅助：判断日程是否已过期
 fun isEventExpired(event: MyEvent): Boolean {
     return try {
-        // 解析结束时间，如果时间字符串不规范，默认为当天的 23:59
         val timeParts = event.endTime.split(":")
         val hour = timeParts.getOrElse(0) { "23" }.toIntOrNull() ?: 23
         val minute = timeParts.getOrElse(1) { "59" }.toIntOrNull() ?: 59
@@ -124,7 +138,7 @@ fun isEventExpired(event: MyEvent): Boolean {
     }
 }
 
-// 辅助：创建系统闹钟 (Flyme/国产ROM 适配版)
+// 辅助：创建系统闹钟
 fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, date: LocalDate) {
     try {
         val parts = timeStr.split(":")
@@ -135,7 +149,6 @@ fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, da
             putExtra(AlarmClock.EXTRA_MESSAGE, title)
             putExtra(AlarmClock.EXTRA_HOUR, hour)
             putExtra(AlarmClock.EXTRA_MINUTES, minute)
-            // 跳过 UI 确认，直接设置（大多数国产 ROM 支持）
             putExtra(AlarmClock.EXTRA_SKIP_UI, true)
             putExtra(AlarmClock.EXTRA_VIBRATE, true)
 
@@ -147,7 +160,6 @@ fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, da
                 }
                 putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(calendarDay))
             }
-
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
         context.startActivity(intent)
@@ -161,20 +173,28 @@ fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, da
 class MainActivity : ComponentActivity() {
 
     private val myEvents = mutableStateListOf<MyEvent>()
+    private val courses = mutableStateListOf<Course>()
     private lateinit var eventStore: EventJsonStore
+    private lateinit var courseStore: CourseJsonStore
+    private lateinit var settings: MySettings
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        settings = MyApplication.getInstance().getSettings()
         eventStore = EventJsonStore(this)
+        courseStore = CourseJsonStore(this)
         loadDataFromFile()
 
         setContent {
             CalendarAssistantTheme {
                 MainScreen(
                     events = myEvents,
+                    courses = courses,
+                    settings = settings,
                     onDataChanged = { saveData() },
+                    onCoursesChanged = { saveCourses() },
                     eventStore = eventStore,
                     onImportEvents = { importedList ->
                         val existingIds = myEvents.map { it.id }.toSet()
@@ -194,9 +214,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadDataFromFile() {
-        val savedData = eventStore.loadEvents()
-        myEvents.clear()
-        myEvents.addAll(savedData)
+        lifecycleScope.launch(Dispatchers.IO) {
+            val list = eventStore.loadEvents()
+            val courseList = courseStore.loadCourses()
+            withContext(Dispatchers.Main) {
+                myEvents.clear()
+                myEvents.addAll(list)
+                courses.clear()
+                courses.addAll(courseList)
+            }
+        }
     }
 
     private fun saveData() {
@@ -207,6 +234,12 @@ class MainActivity : ComponentActivity() {
                 NotificationScheduler.cancelReminders(currentContext, event)
                 NotificationScheduler.scheduleReminders(currentContext, event)
             }
+        }.start()
+    }
+
+    private fun saveCourses() {
+        Thread {
+            courseStore.saveCourses(courses.toList())
         }.start()
     }
 
@@ -222,7 +255,10 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen(
     events: androidx.compose.runtime.snapshots.SnapshotStateList<MyEvent>,
+    courses: androidx.compose.runtime.snapshots.SnapshotStateList<Course>,
+    settings: MySettings,
     onDataChanged: () -> Unit,
+    onCoursesChanged: () -> Unit,
     eventStore: EventJsonStore,
     onImportEvents: (List<MyEvent>) -> Unit
 ) {
@@ -231,11 +267,56 @@ fun MainScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
 
+    // --- UI 状态 ---
     var selectedTab by remember { mutableIntStateOf(0) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var showCourseManager by remember { mutableStateOf(false) }
+    var showTimeTableEditor by remember { mutableStateOf(false) }
+
+    // 【新增】AI 输入弹窗状态
+    var showAiInputDialog by remember { mutableStateOf(false) }
+
     var editingEvent by remember { mutableStateOf<MyEvent?>(null) }
     var revealedEventId by remember { mutableStateOf<String?>(null) }
+    var selectedDate by remember { mutableStateOf(LocalDate.now()) }
 
+    // --- 设置状态缓存 ---
+    var semesterStartDate by remember { mutableStateOf(if (settings.semesterStartDate.isNotBlank()) LocalDate.parse(settings.semesterStartDate) else null) }
+    var totalWeeks by remember { mutableIntStateOf(settings.totalWeeks) }
+    // 强制刷新 Key
+    var timeTableJsonTrigger by remember { mutableStateOf(settings.timeTableJson) }
+
+    // --- 侧边栏折叠状态 ---
+    var expandedAI by remember { mutableStateOf(false) }
+    var expandedSchedule by remember { mutableStateOf(false) }
+    var expandedPrefs by remember { mutableStateOf(false) }
+
+    // --- 数据计算 ---
+    val dailyCourses = remember(courses.toList(), selectedDate, semesterStartDate, totalWeeks, timeTableJsonTrigger) {
+        CourseManager.getDailyCourses(
+            targetDate = selectedDate,
+            allCourses = courses,
+            settings = settings
+        )
+    }
+
+    val currentEvents = remember(events.toList(), selectedDate, dailyCourses) {
+        val dateEvents = events.filter {
+            it.startDate == selectedDate && it.eventType != "temp"
+        }
+        (dateEvents + dailyCourses).sortedBy { it.startTime }
+    }
+
+    val tomorrowEvents = remember(events.toList(), selectedDate) {
+        if (selectedDate == LocalDate.now() && settings.showTomorrowEvents) {
+            val tomorrow = LocalDate.now().plusDays(1)
+            events.filter { it.startDate == tomorrow && it.eventType != "temp" }
+        } else {
+            emptyList()
+        }
+    }
+
+    // --- 日程导入/导出逻辑 ---
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri: Uri? ->
@@ -293,6 +374,72 @@ fun MainScreen(
         }
     }
 
+    // --- 课程导入/导出逻辑 ---
+    val importCoursesLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri: Uri? ->
+            uri?.let {
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        context.contentResolver.openInputStream(it)?.use { inputStream ->
+                            val jsonString = BufferedReader(InputStreamReader(inputStream)).readText()
+                            val jsonParser = Json { ignoreUnknownKeys = true }
+                            val importedCourses = jsonParser.decodeFromString<List<Course>>(jsonString)
+
+                            withContext(Dispatchers.Main) {
+                                if (importedCourses.isNotEmpty()) {
+                                    courses.clear()
+                                    courses.addAll(importedCourses)
+                                    onCoursesChanged()
+                                    Toast.makeText(context, "成功导入 ${importedCourses.size} 门课程", Toast.LENGTH_SHORT).show()
+                                    drawerState.close()
+                                } else {
+                                    Toast.makeText(context, "文件解析为空", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(context, "导入课程失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+    fun exportCourses() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val jsonParser = Json { prettyPrint = true }
+                val jsonString = jsonParser.encodeToString<List<Course>>(courses.toList())
+
+                val fileName = "CoursesBackup_${System.currentTimeMillis()}.json"
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+
+                uri?.let {
+                    resolver.openOutputStream(it)?.use { outputStream ->
+                        outputStream.write(jsonString.toByteArray())
+                    }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "课表已导出到下载目录", Toast.LENGTH_LONG).show()
+                        drawerState.close()
+                    }
+                } ?: run {
+                    withContext(Dispatchers.Main) { Toast.makeText(context, "无法创建导出文件", Toast.LENGTH_SHORT).show() }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { Toast.makeText(context, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show() }
+            }
+        }
+    }
+
     val tabs = listOf("今日", "全部")
     val icons = listOf(Icons.Default.Today, Icons.Default.FormatListBulleted)
 
@@ -300,27 +447,41 @@ fun MainScreen(
         drawerState = drawerState,
         gesturesEnabled = drawerState.isOpen,
         drawerContent = {
-            ModalDrawerSheet {
+            ModalDrawerSheet(windowInsets = WindowInsets(0, 0, 0, 0)) {
                 Spacer(Modifier.height(48.dp))
                 Text("设置", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.headlineSmall)
                 HorizontalDivider()
-                Box(Modifier.padding(16.dp)) {
+                Box(Modifier.padding(horizontal = 16.dp)) {
                     Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                        ModelSettingsSidebar(snackbarHostState)
+                        ModelSettingsGroup(snackbarHostState, expandedAI) { expandedAI = it }
 
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+                        ScheduleSettingsSidebar(
+                            expanded = expandedSchedule,
+                            onExpandedChange = { expandedSchedule = it },
+                            semesterStartDate = semesterStartDate,
+                            onSemesterStartDateChange = {
+                                semesterStartDate = it
+                                settings.semesterStartDate = it.toString()
+                            },
+                            totalWeeks = totalWeeks,
+                            onTotalWeeksChange = {
+                                totalWeeks = it
+                                settings.totalWeeks = it
+                            },
+                            onManageCourses = { showCourseManager = true },
+                            onEditTimeTable = { showTimeTableEditor = true },
+                            onExportCourses = { exportCourses() },
+                            onImportCourses = { importCoursesLauncher.launch(arrayOf("application/json")) }
+                        )
 
-                        // 偏好设置
-                        Text("偏好设置", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
-                        PreferenceSettings(snackbarHostState)
+                        PreferenceSettingsGroup(snackbarHostState, expandedPrefs) { expandedPrefs = it }
 
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
-
+                        Spacer(Modifier.height(16.dp))
                         Text("数据备份", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
                         OutlinedButton(onClick = { exportEvents() }, modifier = Modifier.fillMaxWidth()) {
                             Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("导出日程")
+                            Text("导出所有日程")
                         }
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(onClick = { importLauncher.launch(arrayOf("application/json")) }, modifier = Modifier.fillMaxWidth()) {
@@ -328,7 +489,7 @@ fun MainScreen(
                             Spacer(Modifier.width(8.dp))
                             Text("导入日程")
                         }
-                        Spacer(Modifier.height(24.dp))
+                        Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
                     }
                 }
             }
@@ -345,7 +506,23 @@ fun MainScreen(
             },
             snackbarHost = { SnackbarHost(snackbarHostState) },
             floatingActionButton = {
-                FloatingActionButton(onClick = { showAddDialog = true }) { Icon(Icons.Default.Add, null) }
+                // 【修改】双按钮 FAB
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    SmallFloatingActionButton(
+                        onClick = { showAiInputDialog = true },
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+                    ) {
+                        Icon(Icons.Default.AutoAwesome, "AI 创建")
+                    }
+
+                    FloatingActionButton(onClick = { showAddDialog = true }) {
+                        Icon(Icons.Default.Add, null)
+                    }
+                }
             },
             bottomBar = {
                 NavigationBar {
@@ -372,20 +549,165 @@ fun MainScreen(
                     modifier = Modifier.fillMaxSize()
                 ) { targetTab ->
                     when (targetTab) {
-                        0 -> TodayPageView(events.filter { it.eventType == "event" }, revealedEventId, { revealedEventId = it }, {
-                            NotificationScheduler.cancelReminders(context, it)
-                            events.remove(it)
-                            onDataChanged()
-                        }, { e -> val idx = events.indexOf(e); if(idx != -1) { events[idx] = e.copy(isImportant = !e.isImportant); onDataChanged() } }, { editingEvent = it })
-                        1 -> AllEventsPageView(events, revealedEventId, { revealedEventId = it }, {
-                            NotificationScheduler.cancelReminders(context, it)
-                            events.remove(it)
-                            onDataChanged()
-                        }, { e -> val idx = events.indexOf(e); if(idx != -1) { events[idx] = e.copy(isImportant = !e.isImportant); onDataChanged() } }, { editingEvent = it })
+                        0 -> {
+                            // --- 下拉查看课表交互逻辑 ---
+                            val offsetY = remember { Animatable(0f) }
+                            val maxOffsetPx = with(LocalDensity.current) { 600.dp.toPx() }
+
+                            val nestedScrollConnection = remember {
+                                object : NestedScrollConnection {
+                                    override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                                        if (offsetY.value > 0 && available.y < 0) {
+                                            val newOffset = (offsetY.value + available.y).coerceAtLeast(0f)
+                                            val consumed = offsetY.value - newOffset
+                                            scope.launch { offsetY.snapTo(newOffset) }
+                                            return Offset(0f, -consumed)
+                                        }
+                                        return Offset.Zero
+                                    }
+
+                                    override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                                        if (available.y > 0) {
+                                            val newOffset = (offsetY.value + available.y).coerceAtMost(maxOffsetPx)
+                                            scope.launch { offsetY.snapTo(newOffset) }
+                                            return Offset(0f, available.y)
+                                        }
+                                        return Offset.Zero
+                                    }
+
+                                    override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                                        val target = if (available.y > 1000f) {
+                                            maxOffsetPx
+                                        } else if (available.y < -1000f) {
+                                            0f
+                                        } else {
+                                            if (offsetY.value > maxOffsetPx / 3f) maxOffsetPx else 0f
+                                        }
+                                        scope.launch { offsetY.animateTo(target) }
+                                        return super.onPostFling(consumed, available)
+                                    }
+                                }
+                            }
+
+                            BackHandler(enabled = offsetY.value > 0f) {
+                                scope.launch { offsetY.animateTo(0f) }
+                            }
+
+                            Box(modifier = Modifier.fillMaxSize().nestedScroll(nestedScrollConnection)) {
+                                val progress = (offsetY.value / maxOffsetPx).coerceIn(0f, 1f)
+
+                                ScheduleView(
+                                    courses = courses,
+                                    semesterStartDateStr = settings.semesterStartDate,
+                                    totalWeeks = totalWeeks,
+                                    modifier = Modifier
+                                        .matchParentSize()
+                                        .draggable(
+                                            state = rememberDraggableState { delta ->
+                                                if (offsetY.value > 0) {
+                                                    val newOffset = (offsetY.value + delta).coerceIn(0f, maxOffsetPx)
+                                                    scope.launch { offsetY.snapTo(newOffset) }
+                                                }
+                                            },
+                                            orientation = Orientation.Vertical,
+                                            onDragStopped = { velocity ->
+                                                val target = if (velocity > 1000f) maxOffsetPx
+                                                else if (velocity < -1000f) 0f
+                                                else if (offsetY.value > maxOffsetPx / 3f) maxOffsetPx else 0f
+                                                scope.launch { offsetY.animateTo(target) }
+                                            }
+                                        )
+                                        .graphicsLayer {
+                                            alpha = progress
+                                            scaleX = 0.9f + (0.1f * progress)
+                                            scaleY = 0.9f + (0.1f * progress)
+                                        }
+                                )
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .offset { IntOffset(0, offsetY.value.roundToInt()) }
+                                        .graphicsLayer { alpha = 1f - progress }
+                                ) {
+                                    TodayPageView(
+                                        courses = courses,
+                                        semesterStartDateStr = settings.semesterStartDate,
+                                        totalWeeks = totalWeeks,
+                                        currentEvents = currentEvents,
+                                        tomorrowEvents = tomorrowEvents,
+                                        selectedDate = selectedDate,
+                                        onSelectedDateChange = { selectedDate = it },
+                                        revealedId = revealedEventId,
+                                        onRevealStateChange = { revealedEventId = it },
+                                        onDelete = {
+                                            NotificationScheduler.cancelReminders(context, it)
+                                            events.remove(it)
+                                            onDataChanged()
+                                        },
+                                        onImportant = { e ->
+                                            val idx = events.indexOf(e)
+                                            if (idx != -1) {
+                                                events[idx] = e.copy(isImportant = !e.isImportant)
+                                                onDataChanged()
+                                            }
+                                        },
+                                        onEdit = { editingEvent = it }
+                                    )
+                                }
+                            }
+                        }
+
+                        1 -> AllEventsPageView(
+                            events, revealedEventId,
+                            { revealedEventId = it },
+                            {
+                                NotificationScheduler.cancelReminders(context, it)
+                                events.remove(it)
+                                onDataChanged()
+                            },
+                            { e ->
+                                val idx = events.indexOf(e)
+                                if (idx != -1) {
+                                    events[idx] = e.copy(isImportant = !e.isImportant)
+                                    onDataChanged()
+                                }
+                            },
+                            { editingEvent = it }
+                        )
                     }
                 }
             }
         }
+    }
+
+    // --- 弹窗逻辑 ---
+
+    if (showCourseManager) {
+        CourseManagementDialog(
+            courses = courses,
+            onDismiss = { showCourseManager = false },
+            onAddCourse = { courses.add(it); onCoursesChanged() },
+            onDeleteCourse = { courses.remove(it); onCoursesChanged() },
+            onEditCourse = { newCourse ->
+                val idx = courses.indexOfFirst { c -> c.id == newCourse.id }
+                if (idx != -1) courses[idx] = newCourse
+                onCoursesChanged()
+            }
+        )
+    }
+
+    if (showTimeTableEditor) {
+        TimeTableEditorDialog(
+            initialJson = settings.timeTableJson,
+            onDismiss = { showTimeTableEditor = false },
+            onConfirm = { newJson ->
+                settings.timeTableJson = newJson
+                timeTableJsonTrigger = newJson
+                showTimeTableEditor = false
+                Toast.makeText(context, "作息时间表已更新", Toast.LENGTH_SHORT).show()
+            }
+        )
     }
 
     if (showAddDialog || editingEvent != null) {
@@ -394,54 +716,148 @@ fun MainScreen(
             currentEventsCount = events.size,
             onDismiss = { showAddDialog = false; editingEvent = null },
             onConfirm = { newEvent ->
-                if (editingEvent != null) {
-                    val index = events.indexOfFirst { it.id == editingEvent!!.id }
-                    if (index != -1) {
-                        NotificationScheduler.cancelReminders(context, events[index])
-                        events[index] = newEvent
-                    }
+                // 【修复逻辑开始】
+                // 1. 尝试查找是否存在旧日程
+                val existingIndex = if (editingEvent != null) {
+                    events.indexOfFirst { it.id == editingEvent!!.id }
                 } else {
+                    -1
+                }
+
+                if (existingIndex != -1) {
+                    // 情况 A：这是在编辑一个【已存在】的日程 -> 执行更新
+                    NotificationScheduler.cancelReminders(context, events[existingIndex])
+                    events[existingIndex] = newEvent
+                } else {
+                    // 情况 B：这是【手动添加】(editingEvent为null)
+                    //        或者【AI生成】(editingEvent不为null，但在列表中找不到ID)
+                    //        -> 执行新增
                     events.add(newEvent)
-                    val settings = MyApplication.getInstance().getSettings()
-                    if (settings.autoCreateAlarm && newEvent.eventType == "event") {
-                        createSystemAlarmHelper(context, newEvent.title, newEvent.startTime, newEvent.startDate)
+
+                    val appSettings = MyApplication.getInstance().getSettings()
+                    // 只有未来的普通日程才自动加闹钟
+                    if (appSettings.autoCreateAlarm && newEvent.eventType == "event") {
+                        // 简单的防呆检查，防止 AI 把时间设到过去导致闹钟崩溃
+                        val isFuture = try {
+                            val dt = LocalDateTime.parse("${newEvent.startDate} ${newEvent.startTime}", DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                            dt.isAfter(LocalDateTime.now())
+                        } catch (e: Exception) { true }
+
+                        if (isFuture) {
+                            createSystemAlarmHelper(context, newEvent.title, newEvent.startTime, newEvent.startDate)
+                        }
                     }
                 }
+                // 【修复逻辑结束】
+
                 onDataChanged()
                 showAddDialog = false
                 editingEvent = null
             }
         )
     }
+
+    // 【新增】AI 输入弹窗逻辑
+    if (showAiInputDialog) {
+        AiCreationDialog(
+            onDismiss = { showAiInputDialog = false },
+            onConfirm = { userText ->
+                showAiInputDialog = false
+                Toast.makeText(context, "正在分析语义...", Toast.LENGTH_SHORT).show()
+
+                scope.launch(Dispatchers.IO) {
+                    val result = RecognitionProcessor.parseUserText(userText)
+
+                    withContext(Dispatchers.Main) {
+                        if (result != null) {
+                            val newEvent = MyEvent(
+                                id = UUID.randomUUID().toString(),
+                                title = result.title,
+                                startDate = LocalDate.parse(result.startTime.substring(0, 10)),
+                                startTime = result.startTime.substring(11, 16),
+                                endDate = if(result.endTime.isNotBlank()) LocalDate.parse(result.endTime.substring(0, 10)) else LocalDate.now(),
+                                endTime = if(result.endTime.isNotBlank()) result.endTime.substring(11, 16) else "",
+                                location = result.location,
+                                description = result.description,
+                                eventType = if(result.type == "pickup") "temp" else "event",
+                                color = getNextColor(events.size)
+                            )
+
+                            // 自动填充到编辑弹窗
+                            editingEvent = newEvent
+                        } else {
+                            Toast.makeText(context, "AI 没听懂，请重试或手动添加", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun AiCreationDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.AutoAwesome, null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("AI 智能创建")
+            }
+        },
+        text = {
+            Column {
+                Text("请输入自然语言，例如：\n“明天下午3点在会议室开会”\n“下周五晚上8点去取快递 5566”",
+                    style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.fillMaxWidth().height(120.dp),
+                    placeholder = { Text("在此输入...") },
+                    shape = RoundedCornerShape(12.dp)
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { if (text.isNotBlank()) onConfirm(text) },
+                enabled = text.isNotBlank()
+            ) {
+                Text("解析生成")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+        shape = RoundedCornerShape(24.dp),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+    )
 }
 
 @Composable
 fun TodayPageView(
-    events: List<MyEvent>,
+    courses: List<Course>,              // 【新增参数】
+    semesterStartDateStr: String,       // 【新增参数】
+    totalWeeks: Int,                    // 【新增参数】
+    currentEvents: List<MyEvent>,
+    tomorrowEvents: List<MyEvent>,
+    selectedDate: LocalDate,
+    onSelectedDateChange: (LocalDate) -> Unit,
     revealedId: String?,
     onRevealStateChange: (String?) -> Unit,
     onDelete: (MyEvent) -> Unit,
     onImportant: (MyEvent) -> Unit,
     onEdit: (MyEvent) -> Unit
 ) {
-    var selectedDate by remember { mutableStateOf(LocalDate.now()) }
     val context = LocalContext.current
     val isToday = selectedDate == LocalDate.now()
-    val settings = remember { MyApplication.getInstance().getSettings() }
-
-    // 【修改点】：在这里增加了 && !isEventExpired(it)
-    // 使得已过期的日程不再出现在 currentEvents 列表中
-    val currentEvents = events.filter {
-        (it.startDate <= selectedDate && it.endDate >= selectedDate) && !isEventExpired(it)
-    }
-
-    val showTomorrow = settings.showTomorrowEvents
-    val tomorrowEvents = if (isToday && showTomorrow) {
-        val tomorrow = LocalDate.now().plusDays(1)
-        events.filter { it.startDate == tomorrow }
-    } else {
-        emptyList()
-    }
 
     var serviceEnabled by remember { mutableStateOf(false) }
     var notificationEnabled by remember { mutableStateOf(true) }
@@ -453,147 +869,243 @@ fun TodayPageView(
         onPauseOrDispose { }
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 80.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+    // --- Schedule View Gesture Logic ---
+    val offsetY = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val maxOffsetPx = with(LocalDensity.current) { 600.dp.toPx() }
+
+    val nestedScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (offsetY.value > 0 && available.y < 0) {
+                    val newOffset = (offsetY.value + available.y).coerceAtLeast(0f)
+                    val consumed = offsetY.value - newOffset
+                    scope.launch { offsetY.snapTo(newOffset) }
+                    return Offset(0f, -consumed)
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (available.y > 0) {
+                    val newOffset = (offsetY.value + available.y).coerceAtMost(maxOffsetPx)
+                    scope.launch { offsetY.snapTo(newOffset) }
+                    return Offset(0f, available.y)
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                val target = if (available.y > 1000f) {
+                    maxOffsetPx // Hard swipe down -> Open
+                } else if (available.y < -1000f) {
+                    0f // Hard swipe up -> Close
+                } else {
+                    if (offsetY.value > maxOffsetPx / 3f) maxOffsetPx else 0f // Snap to closest
+                }
+                scope.launch { offsetY.animateTo(target) }
+                return super.onPostFling(consumed, available)
+            }
+        }
+    }
+
+    BackHandler(enabled = offsetY.value > 0f) {
+        scope.launch { offsetY.animateTo(0f) }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(nestedScrollConnection)
     ) {
-        item {
-            Spacer(modifier = Modifier.height(24.dp))
-            Card(
-                modifier = Modifier
-                    .padding(horizontal = 24.dp)
-                    .fillMaxWidth()
-                    .aspectRatio(0.95f)
-                    .pointerInput(Unit) {
-                        var totalDrag = 0f
-                        detectHorizontalDragGestures(
-                            onDragEnd = {
-                                if (totalDrag < -50) selectedDate = selectedDate.plusDays(1)
-                                else if (totalDrag > 50) selectedDate = selectedDate.minusDays(1)
-                                totalDrag = 0f
-                            },
-                            onHorizontalDrag = { change, dragAmount -> change.consume(); totalDrag += dragAmount }
-                        )
+        val progress = (offsetY.value / maxOffsetPx).coerceIn(0f, 1f)
+
+        // Background: Schedule View
+        // 【核心修改】：传入课程数据参数
+        ScheduleView(
+            courses = courses,
+            semesterStartDateStr = semesterStartDateStr,
+            totalWeeks = totalWeeks,
+            modifier = Modifier
+                .matchParentSize()
+                .draggable(
+                    state = rememberDraggableState { delta ->
+                        if (offsetY.value > 0) {
+                            val newOffset = (offsetY.value + delta).coerceIn(0f, maxOffsetPx)
+                            scope.launch { offsetY.snapTo(newOffset) }
+                        }
                     },
-                shape = RoundedCornerShape(4.dp),
-                elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(0.2f)
-                            .background(if (isToday) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceDim)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = { selectedDate = LocalDate.now() }
-                            )
-                    )
-                    Column(
-                        modifier = Modifier.fillMaxWidth().weight(0.8f),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
-                            Text(text = selectedDate.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.CHINESE), style = MaterialTheme.typography.titleLarge)
-                            Spacer(Modifier.width(8.dp))
-                            Text(text = getLunarDate(selectedDate), style = MaterialTheme.typography.titleLarge)
+                    orientation = Orientation.Vertical,
+                    onDragStopped = { velocity ->
+                        val target = if (velocity > 1000f) {
+                            maxOffsetPx
+                        } else if (velocity < -1000f) {
+                            0f
+                        } else {
+                            if (offsetY.value > maxOffsetPx / 3f) maxOffsetPx else 0f
                         }
-                        Text(
-                            text = selectedDate.dayOfMonth.toString(),
-                            fontSize = 140.sp,
-                            fontWeight = FontWeight.Black,
-                            lineHeight = 140.sp,
-                            modifier = Modifier.clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = { selectedDate = LocalDate.now() }
-                            )
-                        )
-                        Text(text = "${selectedDate.year}年${selectedDate.monthValue}月", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+                        scope.launch { offsetY.animateTo(target) }
                     }
-                }
-            }
-        }
-
-        if (!serviceEnabled) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)),
-                    onClick = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }) }
-                ) {
-                    Row(modifier = Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                        Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error)
-                        Spacer(Modifier.width(12.dp))
-                        Text("无障碍服务未开启 (点击开启)", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-                    }
-                }
-            }
-        }
-
-        if (!notificationEnabled) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)),
-                    onClick = {
-                        val intent = Intent().apply {
-                            action = Settings.ACTION_APP_NOTIFICATION_SETTINGS
-                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                        }
-                        context.startActivity(intent)
-                    }
-                ) {
-                    Row(modifier = Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                        Icon(Icons.Default.NotificationsOff, null, tint = MaterialTheme.colorScheme.error)
-                        Spacer(Modifier.width(12.dp))
-                        Text("通知权限未开启 (点击开启)", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-                    }
-                }
-            }
-        }
-
-        item {
-            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(6.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    text = if (isToday) "今日安排" else "${selectedDate.monthValue}月${selectedDate.dayOfMonth}日 安排",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.ExtraBold
                 )
-            }
-        }
-
-        if (currentEvents.isEmpty()) {
-            item { Text("暂无日程", modifier = Modifier.padding(vertical = 40.dp), color = Color.LightGray) }
-        } else {
-            items(currentEvents, key = { it.id }) { event ->
-                SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
-            }
-        }
-
-        if (tomorrowEvents.isNotEmpty()) {
-            item {
-                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.size(6.dp).background(MaterialTheme.colorScheme.tertiary, CircleShape))
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        text = "明日安排",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.tertiary
-                    )
+                .graphicsLayer {
+                    alpha = progress
+                    scaleX = 0.9f + (0.1f * progress)
+                    scaleY = 0.9f + (0.1f * progress)
                 }
-            }
-            items(tomorrowEvents, key = { it.id }) { event ->
-                SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
+        )
+
+        // Foreground: Calendar List
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .offset { IntOffset(0, offsetY.value.roundToInt()) }
+                .graphicsLayer {
+                    alpha = 1f - progress
+                }
+        ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 80.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                item {
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Card(
+                        modifier = Modifier
+                            .padding(horizontal = 24.dp)
+                            .fillMaxWidth()
+                            .aspectRatio(0.95f)
+                            .pointerInput(selectedDate) {
+                                var totalDrag = 0f
+                                detectHorizontalDragGestures(
+                                    onDragEnd = {
+                                        if (totalDrag < -50) onSelectedDateChange(selectedDate.plusDays(1))
+                                        else if (totalDrag > 50) onSelectedDateChange(selectedDate.minusDays(1))
+                                        totalDrag = 0f
+                                    },
+                                    onHorizontalDrag = { change, dragAmount -> change.consume(); totalDrag += dragAmount }
+                                )
+                            },
+                        shape = RoundedCornerShape(4.dp),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    ) {
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(0.2f)
+                                    .background(if (isToday) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceDim)
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                        onClick = { onSelectedDateChange(LocalDate.now()) }
+                                    )
+                            )
+                            Column(
+                                modifier = Modifier.fillMaxWidth().weight(0.8f),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
+                                    Text(text = selectedDate.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.CHINESE), style = MaterialTheme.typography.titleLarge)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(text = getLunarDate(selectedDate), style = MaterialTheme.typography.titleLarge)
+                                }
+                                Text(
+                                    text = selectedDate.dayOfMonth.toString(),
+                                    fontSize = 140.sp,
+                                    fontWeight = FontWeight.Black,
+                                    lineHeight = 140.sp,
+                                    modifier = Modifier.clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                        onClick = { onSelectedDateChange(LocalDate.now()) }
+                                    )
+                                )
+                                Text(text = "${selectedDate.year}年${selectedDate.monthValue}月", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+                            }
+                        }
+                    }
+                }
+
+                if (!serviceEnabled) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)),
+                            onClick = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }) }
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                                Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error)
+                                Spacer(Modifier.width(12.dp))
+                                Text("无障碍服务未开启 (点击开启)", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+
+                if (!notificationEnabled) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)),
+                            onClick = {
+                                val intent = Intent().apply {
+                                    action = Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                context.startActivity(intent)
+                            }
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                                Icon(Icons.Default.NotificationsOff, null, tint = MaterialTheme.colorScheme.error)
+                                Spacer(Modifier.width(12.dp))
+                                Text("通知权限未开启 (点击开启)", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.size(6.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            text = if (isToday) "今日安排" else "${selectedDate.monthValue}月${selectedDate.dayOfMonth}日 安排",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+
+                if (currentEvents.isEmpty()) {
+                    item { Text("暂无日程", modifier = Modifier.padding(vertical = 40.dp), color = Color.LightGray) }
+                } else {
+                    items(currentEvents, key = { it.id }) { event ->
+                        SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
+                    }
+                }
+
+                if (tomorrowEvents.isNotEmpty()) {
+                    item {
+                        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(modifier = Modifier.size(6.dp).background(MaterialTheme.colorScheme.tertiary, CircleShape))
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = "明日安排",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.tertiary
+                            )
+                        }
+                    }
+                    items(tomorrowEvents, key = { it.id }) { event ->
+                        SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
+                    }
+                }
             }
         }
     }
@@ -605,7 +1117,15 @@ fun AllEventsPageView(events: List<MyEvent>, revealedId: String?, onRevealStateC
     var searchQuery by remember { mutableStateOf("") }
 
     val filteredEvents = events.filter { event ->
-        val categoryMatch = if (selectedCategory == 0) event.eventType == "event" else event.eventType != "event"
+        // 【修改】: 修复分类逻辑
+        val categoryMatch = if (selectedCategory == 0) {
+            // Tab 0 (日程事件): 显示普通日程(event) 和 课程(course)
+            event.eventType != "temp"
+        } else {
+            // Tab 1 (临时事件): 只显示 temp
+            event.eventType == "temp"
+        }
+
         val searchMatch = if (searchQuery.isBlank()) true else {
             event.title.contains(searchQuery, ignoreCase = true) ||
                     event.description.contains(searchQuery, ignoreCase = true) ||
@@ -754,7 +1274,6 @@ fun SwipeableEventItem(
             color = MaterialTheme.colorScheme.surface,
             shadowElevation = 0.dp
         ) {
-            // 【修正】: 只在内容层应用透明度，防止透出底层按钮
             Column(
                 modifier = Modifier.alpha(if (isExpired) 0.6f else 1f)
             ) {
@@ -810,383 +1329,7 @@ fun SwipeActionIcon(icon: ImageVector, tint: Color, onClick: () -> Unit) {
     Box(modifier = Modifier.size(48.dp).padding(4.dp).clip(RoundedCornerShape(12.dp)).background(tint.copy(alpha = 0.15f)).clickable { onClick() }, contentAlignment = Alignment.Center) { Icon(icon, null, tint = tint) }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ModelSettingsSidebar(snackbarHostState: SnackbarHostState) {
-    val scope = rememberCoroutineScope()
-    val settings = MyApplication.getInstance().getSettings()
 
-    val currentUrl = settings.modelUrl
-    val currentModel = settings.modelName
-
-    val initialProvider = when {
-        currentUrl.contains("deepseek") -> "DeepSeek"
-        currentUrl.contains("openai") -> "OpenAI"
-        currentUrl.contains("googleapis") -> "Gemini"
-        currentUrl.isBlank() && currentModel.isBlank() -> "DeepSeek"
-        else -> "自定义"
-    }
-
-    var selectedProvider by remember { mutableStateOf(initialProvider) }
-    var expandedProvider by remember { mutableStateOf(false) }
-    var expandedModel by remember { mutableStateOf(false) }
-
-    var modelUrl by remember { mutableStateOf(settings.modelUrl) }
-    var modelName by remember { mutableStateOf(settings.modelName) }
-    var modelKey by remember { mutableStateOf(settings.modelKey) }
-
-    val providers = listOf("DeepSeek", "OpenAI", "Gemini", "自定义")
-
-    val availableModels = mapOf(
-        "DeepSeek" to listOf("deepseek-chat", "deepseek-coder", "deepseek-reasoner"),
-        "OpenAI" to listOf("gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"),
-        "Gemini" to listOf("gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp")
-    )
-
-    LaunchedEffect(selectedProvider) {
-        if (selectedProvider != "自定义") {
-            modelUrl = when (selectedProvider) {
-                "DeepSeek" -> "https://api.deepseek.com/chat/completions"
-                "OpenAI" -> "https://api.openai.com/v1/chat/completions"
-                "Gemini" -> "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-                else -> ""
-            }
-            val models = availableModels[selectedProvider] ?: emptyList()
-            if (models.isNotEmpty() && modelName !in models) {
-                modelName = models.first()
-            }
-        }
-    }
-
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("AI 模型配置", fontWeight = FontWeight.Bold)
-
-        ExposedDropdownMenuBox(
-            expanded = expandedProvider,
-            onExpandedChange = { expandedProvider = !expandedProvider }
-        ) {
-            OutlinedTextField(
-                value = selectedProvider,
-                onValueChange = {},
-                readOnly = true,
-                label = { Text("服务提供商") },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedProvider) },
-                modifier = Modifier.menuAnchor().fillMaxWidth()
-            )
-            ExposedDropdownMenu(
-                expanded = expandedProvider,
-                onDismissRequest = { expandedProvider = false }
-            ) {
-                providers.forEach { item ->
-                    DropdownMenuItem(
-                        text = { Text(item) },
-                        onClick = {
-                            selectedProvider = item
-                            expandedProvider = false
-                        }
-                    )
-                }
-            }
-        }
-
-        if (selectedProvider != "自定义") {
-            val models = availableModels[selectedProvider] ?: emptyList()
-            ExposedDropdownMenuBox(
-                expanded = expandedModel,
-                onExpandedChange = { expandedModel = !expandedModel }
-            ) {
-                OutlinedTextField(
-                    value = modelName,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("模型名称 (Model)") },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedModel) },
-                    modifier = Modifier.menuAnchor().fillMaxWidth()
-                )
-                ExposedDropdownMenu(
-                    expanded = expandedModel,
-                    onDismissRequest = { expandedModel = false }
-                ) {
-                    models.forEach { item ->
-                        DropdownMenuItem(
-                            text = { Text(item) },
-                            onClick = {
-                                modelName = item
-                                expandedModel = false
-                                if (selectedProvider == "Gemini") {
-                                    modelUrl = "https://generativelanguage.googleapis.com/v1beta/models/$item:generateContent"
-                                }
-                            }
-                        )
-                    }
-                }
-            }
-        }
-
-        OutlinedTextField(
-            value = modelKey,
-            onValueChange = { modelKey = it },
-            label = { Text("API Key") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None
-        )
-
-        if (selectedProvider == "自定义") {
-            OutlinedTextField(
-                value = modelUrl,
-                onValueChange = { modelUrl = it },
-                label = { Text("API 地址 (URL)") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-            OutlinedTextField(
-                value = modelName,
-                onValueChange = { modelName = it },
-                label = { Text("模型名称 (Model)") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-        }
-
-        Button(
-            onClick = {
-                scope.launch {
-                    settings.modelUrl = modelUrl.trim()
-                    settings.modelName = modelName.trim()
-                    settings.modelKey = modelKey.trim()
-                    snackbarHostState.showSnackbar("AI 配置已保存")
-                }
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("保存 AI 配置")
-        }
-    }
-}
-
-@Composable
-fun PreferenceSettings(snackbarHostState: SnackbarHostState) {
-    val context = LocalContext.current
-    val settings = MyApplication.getInstance().getSettings()
-
-    var autoAlarm by remember { mutableStateOf(settings.autoCreateAlarm) }
-    var showTomorrow by remember { mutableStateOf(settings.showTomorrowEvents) }
-    var dailySummary by remember { mutableStateOf(settings.isDailySummaryEnabled) }
-    // 【新增】实况胶囊开关状态
-    var liveCapsule by remember { mutableStateOf(settings.isLiveCapsuleEnabled) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("创建系统闹钟", style = MaterialTheme.typography.bodyLarge)
-                Text("创建日程后自动创建闹钟", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-            }
-            Switch(
-                checked = autoAlarm,
-                onCheckedChange = {
-                    autoAlarm = it
-                    settings.autoCreateAlarm = it
-                }
-            )
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("显示明日日程", style = MaterialTheme.typography.bodyLarge)
-                Text("在今日日程列表底部预览", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-            }
-            Switch(
-                checked = showTomorrow,
-                onCheckedChange = {
-                    showTomorrow = it
-                    settings.showTomorrowEvents = it
-                }
-            )
-        }
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-        // --- 【新增】实况胶囊设置项 (修改版) ---
-        // 降级处理逻辑：用户需手动开启
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                // 修改 1 & 2: 标题直接加 (Beta)，移除 Chip
-                Text("实况胶囊通知 (Beta)", style = MaterialTheme.typography.bodyLarge)
-
-                // 修改 3: 红字警示文案，强调风险
-                Text(
-                    text = "需开启“无障碍”权限。实验性功能: 可能导致APP通知不稳定、界面异常或耗电增加",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error // 使用警告红
-                )
-            }
-            Switch(
-                checked = liveCapsule,
-                onCheckedChange = {
-                    liveCapsule = it
-                    settings.isLiveCapsuleEnabled = it
-                    if (it) {
-                        Toast.makeText(context, "请确保已开启无障碍服务，否则功能不生效", Toast.LENGTH_LONG).show()
-                    }
-                }
-            )
-        }
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("每日日程提醒", style = MaterialTheme.typography.bodyLarge)
-                Text("早6点提醒今日，晚10点预告明日", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-            }
-            Switch(
-                checked = dailySummary,
-                onCheckedChange = { isChecked ->
-                    dailySummary = isChecked
-                    settings.isDailySummaryEnabled = isChecked
-
-                    if (isChecked) {
-                        DailySummaryScheduler.scheduleAll(context)
-                    } else {
-                        DailySummaryScheduler.cancelAll(context)
-                    }
-                }
-            )
-        }
-    }
-}
-
-// -----------------------------------------------------------
-// 滚轮样式的日期/时间选择器
-// -----------------------------------------------------------
-@Composable
-fun WheelDatePickerDialog(initialDate: LocalDate, onDismiss: () -> Unit, onConfirm: (LocalDate) -> Unit) {
-    var selectedDate by remember { mutableStateOf(initialDate) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = null,
-        text = { WheelDatePicker(initialDate, { selectedDate = it }) },
-        confirmButton = { TextButton(onClick = { onConfirm(selectedDate) }) { Text("确定") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-        shape = RoundedCornerShape(28.dp),
-        containerColor = MaterialTheme.colorScheme.surface,
-        tonalElevation = 6.dp
-    )
-}
-
-@Composable
-fun WheelTimePickerDialog(initialTime: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
-    val parts = initialTime.split(":"); val h = parts.getOrElse(0){"09"}.toIntOrNull()?:9; val m = parts.getOrElse(1){"00"}.toIntOrNull()?:0
-    var sH by remember { mutableIntStateOf(h) }; var sM by remember { mutableIntStateOf(m) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = null,
-        text = { WheelTimePicker(h, m, { hh, mm -> sH = hh; sM = mm }) },
-        confirmButton = { TextButton(onClick = { onConfirm(String.format("%02d:%02d", sH, sM)) }) { Text("确定") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-        shape = RoundedCornerShape(28.dp),
-        containerColor = MaterialTheme.colorScheme.surface,
-        tonalElevation = 6.dp
-    )
-}
-
-@Composable
-fun WheelReminderPickerDialog(
-    initialMinutes: Int,
-    onDismiss: () -> Unit,
-    onConfirm: (Int) -> Unit
-) {
-    val options = NotificationScheduler.REMINDER_OPTIONS
-    val defaultIndex = options.indexOfFirst { it.first == initialMinutes }.takeIf { it != -1 }
-        ?: options.indexOfFirst { it.first == 30 }.takeIf { it != -1 } ?: 4
-
-    var selectedIndex by remember { mutableIntStateOf(defaultIndex) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("添加提醒", style = MaterialTheme.typography.titleMedium) },
-        text = {
-            WheelPicker(
-                items = options.map { it.second },
-                initialIndex = defaultIndex,
-                onSelectionChanged = { selectedIndex = it }
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                onConfirm(options[selectedIndex].first)
-                onDismiss()
-            }) { Text("确定") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
-        },
-        shape = RoundedCornerShape(28.dp),
-        containerColor = MaterialTheme.colorScheme.surface,
-        tonalElevation = 6.dp
-    )
-}
-
-@Composable
-fun WheelDatePicker(initialDate: LocalDate, onDateChanged: (LocalDate) -> Unit) {
-    val years = (2020..2035).toList(); val months = (1..12).toList()
-    var sY by remember { mutableIntStateOf(initialDate.year) }
-    var sM by remember { mutableIntStateOf(initialDate.monthValue) }
-    var sD by remember { mutableIntStateOf(initialDate.dayOfMonth) }
-    val daysInMonth = remember(sY, sM) { YearMonth.of(sY, sM).lengthOfMonth() }
-    LaunchedEffect(daysInMonth) { if (sD > daysInMonth) sD = daysInMonth; onDateChanged(LocalDate.of(sY, sM, sD)) }
-    LaunchedEffect(sY, sM, sD) { if (sD <= daysInMonth) onDateChanged(LocalDate.of(sY, sM, sD)) }
-    Row(Modifier.fillMaxWidth().padding(horizontal=8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        WheelPicker(years.map{"${it}年"}, years.indexOf(sY).coerceAtLeast(0), Modifier.weight(1.3f)) { sY = years[it] }
-        WheelPicker(months.map{String.format("%02d月",it)}, months.indexOf(sM).coerceAtLeast(0), Modifier.weight(1f)) { sM = months[it] }
-        WheelPicker((1..daysInMonth).map{String.format("%02d日",it)}, (sD-1).coerceIn(0,daysInMonth-1), Modifier.weight(1f)) { sD = it+1 }
-    }
-}
-
-@Composable
-fun WheelTimePicker(initialHour: Int, initialMinute: Int, onTimeChanged: (Int, Int) -> Unit) {
-    val hours = (0..23).toList(); val minutes = (0..59).toList()
-    var cH by remember { mutableIntStateOf(initialHour) }; var cM by remember { mutableIntStateOf(initialMinute) }
-    LaunchedEffect(cH, cM) { onTimeChanged(cH, cM) }
-    Row(Modifier.fillMaxWidth().padding(horizontal=16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)) {
-        WheelPicker(hours.map{String.format("%02d",it)}, initialHour, Modifier.weight(1f)) { cH = hours[it] }
-        Text(":", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.CenterVertically))
-        WheelPicker(minutes.map{String.format("%02d",it)}, initialMinute, Modifier.weight(1f)) { cM = minutes[it] }
-    }
-}
-
-@Composable
-fun WheelPicker(items: List<String>, initialIndex: Int, modifier: Modifier = Modifier, onSelectionChanged: (Int) -> Unit) {
-    val listState = rememberPagerState(initialPage = initialIndex) { items.size }
-    LaunchedEffect(listState.currentPage) { onSelectionChanged(listState.currentPage) }
-    Box(modifier.height(175.dp), contentAlignment = Alignment.Center) {
-        Box(Modifier.fillMaxWidth().padding(horizontal=4.dp).height(35.dp).background(MaterialTheme.colorScheme.onSurface.copy(alpha=0.1f), RoundedCornerShape(12.dp)))
-        VerticalPager(state = listState, contentPadding = PaddingValues(vertical = 70.dp), modifier = Modifier.fillMaxSize()) { page ->
-            val pageOffset = (listState.currentPage - page) + listState.currentPageOffsetFraction
-            val alpha = (1f - (Math.abs(pageOffset) * 0.6f)).coerceAtLeast(0.2f)
-            Box(Modifier.height(35.dp), contentAlignment = Alignment.Center) {
-                Text(text = items[page], fontSize = 18.sp, fontWeight = if (Math.abs(pageOffset) < 0.5) FontWeight.Bold else FontWeight.Normal, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.fillMaxWidth().alpha(alpha))
-            }
-        }
-    }
-}
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
@@ -1322,36 +1465,3 @@ fun checkAccessibilityEnabled(context: Context): Boolean {
                 it.resolveInfo.serviceInfo.name == TextAccessibilityService::class.java.name
     }
 }
-
-object LocalDateSerializer : KSerializer<LocalDate> {
-    private val formatter = DateTimeFormatter.ISO_LOCAL_DATE
-    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("LocalDate", PrimitiveKind.STRING)
-    override fun serialize(encoder: Encoder, value: LocalDate) = encoder.encodeString(value.format(formatter))
-    override fun deserialize(decoder: Decoder): LocalDate = LocalDate.parse(decoder.decodeString(), formatter)
-}
-
-object ColorSerializer : KSerializer<Color> {
-    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Color", PrimitiveKind.INT)
-    override fun serialize(encoder: Encoder, value: Color) = encoder.encodeInt(value.toArgb())
-    override fun deserialize(decoder: Decoder): Color = Color(decoder.decodeInt())
-}
-
-@Serializable
-data class MyEvent(
-    val id: String = UUID.randomUUID().toString(),
-    val title: String,
-    @Serializable(with = LocalDateSerializer::class)
-    val startDate: LocalDate,
-    @Serializable(with = LocalDateSerializer::class)
-    val endDate: LocalDate,
-    val startTime: String,
-    val endTime: String,
-    val location: String,
-    val description: String,
-    @Serializable(with = ColorSerializer::class)
-    val color: Color,
-    val isImportant: Boolean = false,
-    val sourceImagePath: String? = null,
-    val reminders: List<Int> = emptyList(),
-    val eventType: String = "event"
-)
