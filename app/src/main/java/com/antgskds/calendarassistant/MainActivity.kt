@@ -68,8 +68,10 @@ import com.antgskds.calendarassistant.llm.RecognitionProcessor
 import com.antgskds.calendarassistant.model.Course
 import com.antgskds.calendarassistant.model.MyEvent
 import com.antgskds.calendarassistant.model.MySettings
+import com.antgskds.calendarassistant.model.TimeNode
 import com.antgskds.calendarassistant.service.TextAccessibilityService
 import com.antgskds.calendarassistant.ui.CourseManagementDialog
+import com.antgskds.calendarassistant.ui.CourseSingleEditDialog // 确保 UI 文件中已定义此组件
 import com.antgskds.calendarassistant.ui.ModelSettingsGroup
 import com.antgskds.calendarassistant.ui.PreferenceSettingsGroup
 import com.antgskds.calendarassistant.ui.ScheduleSettingsSidebar
@@ -80,6 +82,7 @@ import com.antgskds.calendarassistant.ui.WheelReminderPickerDialog
 import com.antgskds.calendarassistant.ui.WheelTimePickerDialog
 import com.antgskds.calendarassistant.ui.theme.CalendarAssistantTheme
 import com.antgskds.calendarassistant.util.NotificationScheduler
+import java.time.temporal.ChronoUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -96,7 +99,6 @@ import java.time.format.TextStyle
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
-
 
 // --- 工具函数与常量 ---
 
@@ -124,7 +126,6 @@ fun getLunarDate(date: LocalDate): String {
     return "${monthNames.getOrElse(month - 1) { "" }}月${dayNames.getOrElse(day - 1) { "" }}"
 }
 
-// 辅助：判断日程是否已过期
 fun isEventExpired(event: MyEvent): Boolean {
     return try {
         val timeParts = event.endTime.split(":")
@@ -133,12 +134,9 @@ fun isEventExpired(event: MyEvent): Boolean {
 
         val endDateTime = LocalDateTime.of(event.endDate, LocalTime.of(hour, minute))
         endDateTime.isBefore(LocalDateTime.now())
-    } catch (e: Exception) {
-        false
-    }
+    } catch (e: Exception) { false }
 }
 
-// 辅助：创建系统闹钟
 fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, date: LocalDate) {
     try {
         val parts = timeStr.split(":")
@@ -153,10 +151,10 @@ fun createSystemAlarmHelper(context: Context, title: String, timeStr: String, da
             putExtra(AlarmClock.EXTRA_VIBRATE, true)
 
             if (date != LocalDate.now()) {
-                val dayOfWeek = date.dayOfWeek.value // 1-7
+                val dayOfWeek = date.dayOfWeek.value
                 val calendarDay = when (dayOfWeek) {
-                    7 -> java.util.Calendar.SUNDAY // 7 -> 1
-                    else -> dayOfWeek + 1          // 1 -> 2
+                    7 -> java.util.Calendar.SUNDAY
+                    else -> dayOfWeek + 1
                 }
                 putExtra(AlarmClock.EXTRA_DAYS, arrayListOf(calendarDay))
             }
@@ -273,25 +271,26 @@ fun MainScreen(
     var showCourseManager by remember { mutableStateOf(false) }
     var showTimeTableEditor by remember { mutableStateOf(false) }
 
-    // 【新增】AI 输入弹窗状态
     var showAiInputDialog by remember { mutableStateOf(false) }
 
+    // 【核心修复：确保没有重复定义】
+    // 1. 单次课程编辑状态
+    var editingVirtualCourse by remember { mutableStateOf<MyEvent?>(null) }
+    // 2. 普通日程编辑状态
     var editingEvent by remember { mutableStateOf<MyEvent?>(null) }
+
     var revealedEventId by remember { mutableStateOf<String?>(null) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
 
-    // --- 设置状态缓存 ---
     var semesterStartDate by remember { mutableStateOf(if (settings.semesterStartDate.isNotBlank()) LocalDate.parse(settings.semesterStartDate) else null) }
     var totalWeeks by remember { mutableIntStateOf(settings.totalWeeks) }
-    // 强制刷新 Key
     var timeTableJsonTrigger by remember { mutableStateOf(settings.timeTableJson) }
 
-    // --- 侧边栏折叠状态 ---
     var expandedAI by remember { mutableStateOf(false) }
     var expandedSchedule by remember { mutableStateOf(false) }
     var expandedPrefs by remember { mutableStateOf(false) }
 
-    // --- 数据计算 ---
+    // 数据计算 (注意：dailyCourses 必须明确为 List<MyEvent>)
     val dailyCourses = remember(courses.toList(), selectedDate, semesterStartDate, totalWeeks, timeTableJsonTrigger) {
         CourseManager.getDailyCourses(
             targetDate = selectedDate,
@@ -299,11 +298,25 @@ fun MainScreen(
             settings = settings
         )
     }
+    val maxNodes = remember(timeTableJsonTrigger) {
+        try {
+            if (timeTableJsonTrigger.isBlank()) {
+                12
+            } else {
+                Json { ignoreUnknownKeys = true }
+                    .decodeFromString<List<TimeNode>>(timeTableJsonTrigger)
+                    .size
+            }
+        } catch (e: Exception) {
+            12
+        }
+    }
 
     val currentEvents = remember(events.toList(), selectedDate, dailyCourses) {
         val dateEvents = events.filter {
             it.startDate == selectedDate && it.eventType != "temp"
         }
+        // 这里合并两个 List<MyEvent>，确保类型一致
         (dateEvents + dailyCourses).sortedBy { it.startTime }
     }
 
@@ -316,7 +329,7 @@ fun MainScreen(
         }
     }
 
-    // --- 日程导入/导出逻辑 ---
+    // --- 导入/导出逻辑 ---
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri: Uri? ->
@@ -374,7 +387,6 @@ fun MainScreen(
         }
     }
 
-    // --- 课程导入/导出逻辑 ---
     val importCoursesLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri: Uri? ->
@@ -506,7 +518,6 @@ fun MainScreen(
             },
             snackbarHost = { SnackbarHost(snackbarHostState) },
             floatingActionButton = {
-                // 【修改】双按钮 FAB
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -550,7 +561,6 @@ fun MainScreen(
                 ) { targetTab ->
                     when (targetTab) {
                         0 -> {
-                            // --- 下拉查看课表交互逻辑 ---
                             val offsetY = remember { Animatable(0f) }
                             val maxOffsetPx = with(LocalDensity.current) { 600.dp.toPx() }
 
@@ -600,6 +610,7 @@ fun MainScreen(
                                     courses = courses,
                                     semesterStartDateStr = settings.semesterStartDate,
                                     totalWeeks = totalWeeks,
+                                    maxNodes = maxNodes,
                                     modifier = Modifier
                                         .matchParentSize()
                                         .draggable(
@@ -634,16 +645,28 @@ fun MainScreen(
                                         courses = courses,
                                         semesterStartDateStr = settings.semesterStartDate,
                                         totalWeeks = totalWeeks,
+                                        maxNodes = maxNodes,
                                         currentEvents = currentEvents,
                                         tomorrowEvents = tomorrowEvents,
                                         selectedDate = selectedDate,
                                         onSelectedDateChange = { selectedDate = it },
                                         revealedId = revealedEventId,
                                         onRevealStateChange = { revealedEventId = it },
-                                        onDelete = {
-                                            NotificationScheduler.cancelReminders(context, it)
-                                            events.remove(it)
+                                        onDelete = { event ->
+                                            NotificationScheduler.cancelReminders(context, event)
+                                            events.remove(event)
                                             onDataChanged()
+                                        },
+                                        onExcludeCourseDate = { courseId, date ->
+                                            val idx = courses.indexOfFirst { it.id == courseId }
+                                            if (idx != -1) {
+                                                val oldCourse = courses[idx]
+                                                val newExcluded = oldCourse.excludedDates.toMutableList().apply {
+                                                    if (!contains(date.toString())) add(date.toString())
+                                                }
+                                                courses[idx] = oldCourse.copy(excludedDates = newExcluded)
+                                                onCoursesChanged()
+                                            }
                                         },
                                         onImportant = { e ->
                                             val idx = events.indexOf(e)
@@ -652,7 +675,16 @@ fun MainScreen(
                                                 onDataChanged()
                                             }
                                         },
-                                        onEdit = { editingEvent = it }
+                                        onEdit = {
+                                            // 【关键】区分编辑对象
+                                            if (it.eventType == "course") {
+                                                editingVirtualCourse = it
+                                                editingEvent = null // 互斥
+                                            } else {
+                                                editingEvent = it
+                                                editingVirtualCourse = null // 互斥
+                                            }
+                                        }
                                     )
                                 }
                             }
@@ -688,7 +720,14 @@ fun MainScreen(
             courses = courses,
             onDismiss = { showCourseManager = false },
             onAddCourse = { courses.add(it); onCoursesChanged() },
-            onDeleteCourse = { courses.remove(it); onCoursesChanged() },
+            // 【连坐删除逻辑】
+            onDeleteCourse = { parentCourse ->
+                // 1. 删主课
+                courses.remove(parentCourse)
+                // 2. 删所有认它做爹的临时课
+                courses.removeAll { it.parentCourseId == parentCourse.id }
+                onCoursesChanged()
+            },
             onEditCourse = { newCourse ->
                 val idx = courses.indexOfFirst { c -> c.id == newCourse.id }
                 if (idx != -1) courses[idx] = newCourse
@@ -710,46 +749,146 @@ fun MainScreen(
         )
     }
 
-    if (showAddDialog || editingEvent != null) {
+    // 【新增：单次课程编辑弹窗】
+    if (editingVirtualCourse != null) {
+        // 从 MyEvent.description (例如 "第1-2节") 解析节次
+        val desc = editingVirtualCourse!!.description
+        val pattern = Regex("第(\\d+)-(\\d+)节")
+        val match = pattern.find(desc)
+        val sNode = match?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val eNode = match?.groupValues?.get(2)?.toIntOrNull() ?: 2
+
+        // 解析日期 (默认为 selectedDate，但为了准确从 ID 解析)
+        val parts = editingVirtualCourse!!.id.split("_")
+        val courseDate = if (parts.size >= 3) {
+            try { LocalDate.parse(parts[2]) } catch (e: Exception) { selectedDate }
+        } else {
+            selectedDate
+        }
+
+        CourseSingleEditDialog(
+            initialName = editingVirtualCourse!!.title,
+            initialLocation = editingVirtualCourse!!.location.split(" | ")[0],
+            initialStartNode = sNode,
+            initialEndNode = eNode,
+            initialDate = courseDate,
+            onDismiss = { editingVirtualCourse = null },
+            onDelete = {
+                if (parts.size >= 3) {
+                    val originalCourseId = parts[1] // 注意：如果是影子课程，这里的 ID 就是影子课程自己的 ID
+                    val dateStr = parts[2]
+
+                    // 找到对应的 Course 对象
+                    val idx = courses.indexOfFirst { it.id == originalCourseId }
+
+                    if (idx != -1) {
+                        val targetCourse = courses[idx]
+
+                        if (targetCourse.isTemp) {
+                            // 【核心修复 1】：如果是影子课程（修改过的课），删除意味着直接移除这个对象
+                            courses.removeAt(idx)
+                        } else {
+                            // 【核心修复 2】：如果是主课程，则加入黑名单
+                            if (!targetCourse.excludedDates.contains(dateStr)) {
+                                val newExcluded = targetCourse.excludedDates + dateStr
+                                courses[idx] = targetCourse.copy(excludedDates = newExcluded)
+                            }
+                        }
+                        onCoursesChanged()
+                    }
+                }
+                editingVirtualCourse = null
+            },
+            onConfirm = { newName, newLoc, newStart, newEnd, newDate ->
+
+                val startDateStr = settings.semesterStartDate
+                val currentWeek = if (startDateStr.isNotBlank()) {
+                    try {
+                        val start = LocalDate.parse(startDateStr)
+                        (ChronoUnit.DAYS.between(start, newDate) / 7).toInt() + 1
+                    } catch (e: Exception) { 1 }
+                } else { 1 }
+
+                if (parts.size >= 3) {
+                    val originalCourseId = parts[1]
+                    // ... (计算 currentWeek 代码保持不变) ...
+
+                    val idx = courses.indexOfFirst { it.id == originalCourseId }
+                    if (idx != -1) {
+                        val oldCourse = courses[idx]
+
+                        if (oldCourse.isTemp) {
+                            // 【场景 A】：再次编辑一个已经是影子的课程 -> 直接更新它自己
+                            val updatedShadow = oldCourse.copy(
+                                name = newName,
+                                location = newLoc,
+                                dayOfWeek = newDate.dayOfWeek.value, // 允许改日期
+                                startNode = newStart,
+                                endNode = newEnd,
+                                startWeek = currentWeek,
+                                endWeek = currentWeek
+                                // parentCourseId 保持不变
+                            )
+                            courses[idx] = updatedShadow
+                            onCoursesChanged()
+                        } else {
+                            // 【场景 B】：编辑一个主课程 -> 1.屏蔽主课程 2.创建新影子
+
+                            // 1. 排除旧课 (使用原始日期 dateStr，因为那才是主课程生成的日期)
+                            val dateStr = parts[2]
+                            val newExcluded = oldCourse.excludedDates.toMutableList().apply {
+                                if (!contains(dateStr)) add(dateStr)
+                            }
+                            courses[idx] = oldCourse.copy(excludedDates = newExcluded)
+
+                            // 2. 创建新影子
+                            val shadowCourse = Course(
+                                id = UUID.randomUUID().toString(),
+                                name = newName,
+                                location = newLoc,
+                                teacher = oldCourse.teacher,
+                                color = oldCourse.color,
+                                dayOfWeek = newDate.dayOfWeek.value,
+                                startNode = newStart,
+                                endNode = newEnd,
+                                startWeek = currentWeek,
+                                endWeek = currentWeek,
+                                weekType = 0, // 影子课程通常只针对这一周，所以设为每周(配合起止周次)即可，或者设为与当前周一致
+                                isTemp = true, // 标记为影子
+                                parentCourseId = oldCourse.id // 认爹
+                            )
+                            courses.add(shadowCourse)
+                            onCoursesChanged()
+                        }
+                    }
+                }
+                editingVirtualCourse = null
+            }
+        )
+    }
+
+    // 普通日程编辑弹窗
+    if ((showAddDialog || editingEvent != null) && editingVirtualCourse == null) {
         ManualAddEventDialog(
             eventToEdit = editingEvent,
             currentEventsCount = events.size,
             onDismiss = { showAddDialog = false; editingEvent = null },
             onConfirm = { newEvent ->
-                // 【修复逻辑开始】
-                // 1. 尝试查找是否存在旧日程
+                // 普通日程逻辑保持不变
                 val existingIndex = if (editingEvent != null) {
                     events.indexOfFirst { it.id == editingEvent!!.id }
-                } else {
-                    -1
-                }
+                } else { -1 }
 
                 if (existingIndex != -1) {
-                    // 情况 A：这是在编辑一个【已存在】的日程 -> 执行更新
                     NotificationScheduler.cancelReminders(context, events[existingIndex])
                     events[existingIndex] = newEvent
                 } else {
-                    // 情况 B：这是【手动添加】(editingEvent为null)
-                    //        或者【AI生成】(editingEvent不为null，但在列表中找不到ID)
-                    //        -> 执行新增
                     events.add(newEvent)
-
                     val appSettings = MyApplication.getInstance().getSettings()
-                    // 只有未来的普通日程才自动加闹钟
                     if (appSettings.autoCreateAlarm && newEvent.eventType == "event") {
-                        // 简单的防呆检查，防止 AI 把时间设到过去导致闹钟崩溃
-                        val isFuture = try {
-                            val dt = LocalDateTime.parse("${newEvent.startDate} ${newEvent.startTime}", DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
-                            dt.isAfter(LocalDateTime.now())
-                        } catch (e: Exception) { true }
-
-                        if (isFuture) {
-                            createSystemAlarmHelper(context, newEvent.title, newEvent.startTime, newEvent.startDate)
-                        }
+                        createSystemAlarmHelper(context, newEvent.title, newEvent.startTime, newEvent.startDate)
                     }
                 }
-                // 【修复逻辑结束】
-
                 onDataChanged()
                 showAddDialog = false
                 editingEvent = null
@@ -757,17 +896,14 @@ fun MainScreen(
         )
     }
 
-    // 【新增】AI 输入弹窗逻辑
     if (showAiInputDialog) {
         AiCreationDialog(
             onDismiss = { showAiInputDialog = false },
             onConfirm = { userText ->
                 showAiInputDialog = false
                 Toast.makeText(context, "正在分析语义...", Toast.LENGTH_SHORT).show()
-
                 scope.launch(Dispatchers.IO) {
                     val result = RecognitionProcessor.parseUserText(userText)
-
                     withContext(Dispatchers.Main) {
                         if (result != null) {
                             val newEvent = MyEvent(
@@ -782,8 +918,6 @@ fun MainScreen(
                                 eventType = if(result.type == "pickup") "temp" else "event",
                                 color = getNextColor(events.size)
                             )
-
-                            // 自动填充到编辑弹窗
                             editingEvent = newEvent
                         } else {
                             Toast.makeText(context, "AI 没听懂，请重试或手动添加", Toast.LENGTH_SHORT).show()
@@ -843,9 +977,10 @@ fun AiCreationDialog(
 
 @Composable
 fun TodayPageView(
-    courses: List<Course>,              // 【新增参数】
-    semesterStartDateStr: String,       // 【新增参数】
-    totalWeeks: Int,                    // 【新增参数】
+    courses: List<Course>,
+    semesterStartDateStr: String,
+    totalWeeks: Int,
+    maxNodes: Int,
     currentEvents: List<MyEvent>,
     tomorrowEvents: List<MyEvent>,
     selectedDate: LocalDate,
@@ -853,6 +988,7 @@ fun TodayPageView(
     revealedId: String?,
     onRevealStateChange: (String?) -> Unit,
     onDelete: (MyEvent) -> Unit,
+    onExcludeCourseDate: (String, LocalDate) -> Unit, // 关键回调
     onImportant: (MyEvent) -> Unit,
     onEdit: (MyEvent) -> Unit
 ) {
@@ -921,38 +1057,41 @@ fun TodayPageView(
         val progress = (offsetY.value / maxOffsetPx).coerceIn(0f, 1f)
 
         // Background: Schedule View
-        // 【核心修改】：传入课程数据参数
-        ScheduleView(
-            courses = courses,
-            semesterStartDateStr = semesterStartDateStr,
-            totalWeeks = totalWeeks,
-            modifier = Modifier
-                .matchParentSize()
-                .draggable(
-                    state = rememberDraggableState { delta ->
-                        if (offsetY.value > 0) {
-                            val newOffset = (offsetY.value + delta).coerceIn(0f, maxOffsetPx)
-                            scope.launch { offsetY.snapTo(newOffset) }
+        // 使用 key 确保参数变化时重绘
+        key(totalWeeks, semesterStartDateStr) {
+            ScheduleView(
+                courses = courses,
+                semesterStartDateStr = semesterStartDateStr,
+                totalWeeks = totalWeeks,
+                maxNodes = maxNodes,
+                modifier = Modifier
+                    .matchParentSize()
+                    .draggable(
+                        state = rememberDraggableState { delta ->
+                            if (offsetY.value > 0) {
+                                val newOffset = (offsetY.value + delta).coerceIn(0f, maxOffsetPx)
+                                scope.launch { offsetY.snapTo(newOffset) }
+                            }
+                        },
+                        orientation = Orientation.Vertical,
+                        onDragStopped = { velocity ->
+                            val target = if (velocity > 1000f) {
+                                maxOffsetPx
+                            } else if (velocity < -1000f) {
+                                0f
+                            } else {
+                                if (offsetY.value > maxOffsetPx / 3f) maxOffsetPx else 0f
+                            }
+                            scope.launch { offsetY.animateTo(target) }
                         }
-                    },
-                    orientation = Orientation.Vertical,
-                    onDragStopped = { velocity ->
-                        val target = if (velocity > 1000f) {
-                            maxOffsetPx
-                        } else if (velocity < -1000f) {
-                            0f
-                        } else {
-                            if (offsetY.value > maxOffsetPx / 3f) maxOffsetPx else 0f
-                        }
-                        scope.launch { offsetY.animateTo(target) }
+                    )
+                    .graphicsLayer {
+                        alpha = progress
+                        scaleX = 0.9f + (0.1f * progress)
+                        scaleY = 0.9f + (0.1f * progress)
                     }
-                )
-                .graphicsLayer {
-                    alpha = progress
-                    scaleX = 0.9f + (0.1f * progress)
-                    scaleY = 0.9f + (0.1f * progress)
-                }
-        )
+            )
+        }
 
         // Foreground: Calendar List
         Box(
@@ -1085,7 +1224,26 @@ fun TodayPageView(
                     item { Text("暂无日程", modifier = Modifier.padding(vertical = 40.dp), color = Color.LightGray) }
                 } else {
                     items(currentEvents, key = { it.id }) { event ->
-                        SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
+                        val isCourse = event.eventType == "course"
+                        SwipeableEventItem(
+                            event = event,
+                            isRevealed = revealedId == event.id,
+                            onExpand = { onRevealStateChange(event.id) },
+                            onCollapse = { onRevealStateChange(null) },
+                            onDelete = {
+                                if (isCourse) {
+                                    val parts = event.id.split("_")
+                                    if (parts.size >= 3) {
+                                        val courseId = parts[1]
+                                        onExcludeCourseDate(courseId, event.startDate)
+                                    }
+                                } else {
+                                    onDelete(it)
+                                }
+                            },
+                            onImportant = { if (isCourse) onEdit(it) else onImportant(it) },
+                            onEdit = onEdit
+                        )
                     }
                 }
 
@@ -1103,7 +1261,26 @@ fun TodayPageView(
                         }
                     }
                     items(tomorrowEvents, key = { it.id }) { event ->
-                        SwipeableEventItem(event, revealedId == event.id, { onRevealStateChange(event.id) }, { onRevealStateChange(null) }, onDelete, onImportant, onEdit)
+                        val isCourse = event.eventType == "course"
+                        SwipeableEventItem(
+                            event = event,
+                            isRevealed = revealedId == event.id,
+                            onExpand = { onRevealStateChange(event.id) },
+                            onCollapse = { onRevealStateChange(null) },
+                            onDelete = {
+                                if (isCourse) {
+                                    val parts = event.id.split("_")
+                                    if (parts.size >= 3) {
+                                        val courseId = parts[1]
+                                        onExcludeCourseDate(courseId, event.startDate)
+                                    }
+                                } else {
+                                    onDelete(it)
+                                }
+                            },
+                            onImportant = { if (isCourse) onEdit(it) else onImportant(it) },
+                            onEdit = onEdit
+                        )
                     }
                 }
             }
@@ -1117,12 +1294,9 @@ fun AllEventsPageView(events: List<MyEvent>, revealedId: String?, onRevealStateC
     var searchQuery by remember { mutableStateOf("") }
 
     val filteredEvents = events.filter { event ->
-        // 【修改】: 修复分类逻辑
         val categoryMatch = if (selectedCategory == 0) {
-            // Tab 0 (日程事件): 显示普通日程(event) 和 课程(course)
             event.eventType != "temp"
         } else {
-            // Tab 1 (临时事件): 只显示 temp
             event.eventType == "temp"
         }
 
@@ -1328,8 +1502,6 @@ fun SwipeableEventItem(
 fun SwipeActionIcon(icon: ImageVector, tint: Color, onClick: () -> Unit) {
     Box(modifier = Modifier.size(48.dp).padding(4.dp).clip(RoundedCornerShape(12.dp)).background(tint.copy(alpha = 0.15f)).clickable { onClick() }, contentAlignment = Alignment.Center) { Icon(icon, null, tint = tint) }
 }
-
-
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable

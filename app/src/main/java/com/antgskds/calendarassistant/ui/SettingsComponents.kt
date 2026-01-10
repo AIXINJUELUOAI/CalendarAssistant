@@ -1,11 +1,11 @@
 package com.antgskds.calendarassistant.ui
 
-import android.content.Context
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -27,9 +27,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.antgskds.calendarassistant.MyApplication
 import com.antgskds.calendarassistant.receiver.DailySummaryScheduler
+import com.antgskds.calendarassistant.util.NotificationScheduler
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.YearMonth
+import java.time.temporal.ChronoUnit
 
 // --- 1. Expandable Group Component ---
 
@@ -46,7 +48,11 @@ fun ExpandableSettingsGroup(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onExpandedChange(!expanded) }
+                // 【修改 1】：去除点击波浪纹
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { onExpandedChange(!expanded) }
                 .padding(vertical = 18.dp, horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -77,7 +83,7 @@ fun ExpandableSettingsGroup(
     }
 }
 
-// --- 2. Schedule Settings Sidebar (New) ---
+// --- 2. Schedule Settings Sidebar ---
 
 @Composable
 fun ScheduleSettingsSidebar(
@@ -89,7 +95,6 @@ fun ScheduleSettingsSidebar(
     onTotalWeeksChange: (Int) -> Unit,
     onManageCourses: () -> Unit,
     onEditTimeTable: () -> Unit,
-    // --- 新增下面这两个回调参数 ---
     onExportCourses: () -> Unit,
     onImportCourses: () -> Unit
 ) {
@@ -101,13 +106,17 @@ fun ScheduleSettingsSidebar(
     ) {
         // Calculate current week
         val currentWeek = if (semesterStartDate != null) {
-            val daysDiff = java.time.temporal.ChronoUnit.DAYS.between(semesterStartDate, LocalDate.now())
+            val daysDiff = ChronoUnit.DAYS.between(semesterStartDate, LocalDate.now())
             (daysDiff / 7).toInt() + 1
         } else {
             1
         }
 
         var showDatePicker by remember { mutableStateOf(false) }
+
+        // 【修改 3】：新增周次选择器状态
+        var showWeekPicker by remember { mutableStateOf(false) }
+        var showTotalWeeksPicker by remember { mutableStateOf(false) }
 
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
             // Row 1: First Day of Week 1
@@ -126,9 +135,12 @@ fun ScheduleSettingsSidebar(
                 )
             }
 
-            // Row 2: Current Week
+            // Row 2: Current Week (可点击)
             Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showWeekPicker = true } // 【修改 3】：添加点击事件
+                    .padding(vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -136,9 +148,12 @@ fun ScheduleSettingsSidebar(
                 Text("第 $currentWeek 周", color = MaterialTheme.colorScheme.primary)
             }
 
-            // Row 3: Total Weeks
+            // Row 3: Total Weeks (可点击)
             Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showTotalWeeksPicker = true } // 【修改 3】：添加点击事件
+                    .padding(vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -171,27 +186,23 @@ fun ScheduleSettingsSidebar(
 
             Spacer(Modifier.height(8.dp))
 
-            // --- 修改部分：导出和导入按钮 ---
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            // 【修改 2】：改为垂直排列，统一样式
+            Text("课表数据", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 4.dp))
+            OutlinedButton(
+                onClick = onExportCourses,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                OutlinedButton(
-                    onClick = onExportCourses,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Default.Download, null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("导出")
-                }
-                OutlinedButton(
-                    onClick = onImportCourses,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Default.Upload, null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("导入")
-                }
+                Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("导出课程数据")
+            }
+            OutlinedButton(
+                onClick = onImportCourses,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Upload, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("导入课程数据")
             }
         }
 
@@ -201,10 +212,64 @@ fun ScheduleSettingsSidebar(
                 showDatePicker = false
             }
         }
+
+        // 【修改 3】：当前周选择器 (反推开始日期)
+        if (showWeekPicker) {
+            val weekOptions = (1..30).toList()
+            var selectedWeek by remember { mutableIntStateOf(currentWeek) }
+
+            AlertDialog(
+                onDismissRequest = { showWeekPicker = false },
+                title = { Text("设置当前是第几周") },
+                text = {
+                    WheelPicker(
+                        items = weekOptions.map { "第 $it 周" },
+                        initialIndex = (currentWeek - 1).coerceAtLeast(0),
+                        onSelectionChanged = { selectedWeek = weekOptions[it] }
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        // 逻辑：如果今天是第 N 周，那么 (N-1) 周前是第一周
+                        val today = LocalDate.now()
+                        val daysToSubtract = (selectedWeek - 1) * 7L
+                        val newStartDate = today.minusDays(daysToSubtract)
+                        onSemesterStartDateChange(newStartDate)
+                        showWeekPicker = false
+                    }) { Text("确定") }
+                },
+                dismissButton = { TextButton(onClick = { showWeekPicker = false }) { Text("取消") } }
+            )
+        }
+
+        // 【修改 3】：总周数选择器
+        if (showTotalWeeksPicker) {
+            val totalOptions = (10..30).toList()
+            var selectedTotal by remember { mutableIntStateOf(totalWeeks) }
+
+            AlertDialog(
+                onDismissRequest = { showTotalWeeksPicker = false },
+                title = { Text("设置学期总周数") },
+                text = {
+                    WheelPicker(
+                        items = totalOptions.map { "$it 周" },
+                        initialIndex = totalOptions.indexOf(totalWeeks).coerceAtLeast(0),
+                        onSelectionChanged = { selectedTotal = totalOptions[it] }
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        onTotalWeeksChange(selectedTotal)
+                        showTotalWeeksPicker = false
+                    }) { Text("确定") }
+                },
+                dismissButton = { TextButton(onClick = { showTotalWeeksPicker = false }) { Text("取消") } }
+            )
+        }
     }
 }
 
-// --- 3. Model Settings (Refactored) ---
+// --- 3. Model Settings ---
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -264,8 +329,6 @@ fun ModelSettingsGroup(
         }
 
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            //Text("配置 DeepSeek, OpenAI, Gemini 等", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-
             ExposedDropdownMenuBox(
                 expanded = expandedProvider,
                 onExpandedChange = { expandedProvider = !expandedProvider }
@@ -355,7 +418,7 @@ fun ModelSettingsGroup(
     }
 }
 
-// --- 4. Preference Settings (Refactored) ---
+// --- 4. Preference Settings ---
 
 @Composable
 fun PreferenceSettingsGroup(
@@ -370,8 +433,6 @@ fun PreferenceSettingsGroup(
     var showTomorrow by remember { mutableStateOf(settings.showTomorrowEvents) }
     var dailySummary by remember { mutableStateOf(settings.isDailySummaryEnabled) }
     var liveCapsule by remember { mutableStateOf(settings.isLiveCapsuleEnabled) }
-
-    // 【新增】读取新配置
     var useRecTime by remember { mutableStateOf(settings.tempEventsUseRecognitionTime) }
     var delayMs by remember { mutableLongStateOf(settings.screenshotDelayMs) }
 
@@ -400,7 +461,7 @@ fun PreferenceSettingsGroup(
                 Switch(checked = showTomorrow, onCheckedChange = { showTomorrow = it; settings.showTomorrowEvents = it })
             }
 
-            // 【新增】Time Recognition Preference
+            // Time Recognition Preference
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("智能提取取件时间", style = MaterialTheme.typography.bodyLarge)
@@ -409,7 +470,7 @@ fun PreferenceSettingsGroup(
                 Switch(checked = useRecTime, onCheckedChange = { useRecTime = it; settings.tempEventsUseRecognitionTime = it })
             }
 
-            // 【新增】Screenshot Delay
+            // Screenshot Delay
             Column(Modifier.fillMaxWidth()) {
                 Text("截图识别延迟: ${delayMs}ms", style = MaterialTheme.typography.bodyLarge)
                 Text("调整等待通知栏收起的时间", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
@@ -418,7 +479,7 @@ fun PreferenceSettingsGroup(
                     onValueChange = { delayMs = it.toLong() },
                     onValueChangeFinished = { settings.screenshotDelayMs = delayMs },
                     valueRange = 200f..2000f,
-                    steps = 17 // (2000-200)/100 = 18 steps roughly
+                    steps = 17
                 )
             }
 
@@ -451,10 +512,7 @@ fun PreferenceSettingsGroup(
     }
 }
 
-// --- Helper: Wheel Pickers (Moved from MainActivity if needed, or just duplicated/public) ---
-// Note: To avoid duplication and circular dependency issues if I move them, 
-// I will assuming they remain in MainActivity for now or I need to copy them here.
-// For a clean separation, I'll include the Wheel Pickers here as they are UI helpers.
+// --- Pickers ---
 
 @Composable
 fun WheelDatePickerDialog(initialDate: LocalDate, onDismiss: () -> Unit, onConfirm: (LocalDate) -> Unit) {
@@ -528,7 +586,7 @@ fun WheelReminderPickerDialog(
     onDismiss: () -> Unit,
     onConfirm: (Int) -> Unit
 ) {
-    val options = com.antgskds.calendarassistant.util.NotificationScheduler.REMINDER_OPTIONS
+    val options = NotificationScheduler.REMINDER_OPTIONS
     val defaultIndex = options.indexOfFirst { it.first == initialMinutes }.takeIf { it != -1 }
         ?: options.indexOfFirst { it.first == 30 }.takeIf { it != -1 } ?: 4
 

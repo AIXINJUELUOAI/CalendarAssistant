@@ -1,6 +1,5 @@
 package com.antgskds.calendarassistant
 
-import android.content.Context
 import com.antgskds.calendarassistant.model.Course
 import com.antgskds.calendarassistant.model.MyEvent
 import com.antgskds.calendarassistant.model.MySettings
@@ -41,7 +40,7 @@ object CourseManager {
         // Parse TimeTable
         val timeTableJson = settings.timeTableJson
         val timeNodes = if (timeTableJson.isBlank()) {
-             getDefaultTimeNodes()
+            getDefaultTimeNodes()
         } else {
             try {
                 json.decodeFromString<List<TimeNode>>(timeTableJson)
@@ -52,19 +51,30 @@ object CourseManager {
         val timeMap = timeNodes.associateBy { it.index }
 
         val dayOfWeek = targetDate.dayOfWeek.value // 1 (Mon) - 7 (Sun)
+        val targetDateStr = targetDate.toString() // yyyy-MM-dd
 
         return allCourses.filter { course ->
+            // 1. 检查周次范围
             val weekMatch = currentWeek in course.startWeek..course.endWeek
+            // 2. 检查单双周
             val typeMatch = course.weekType == 0 || course.weekType == currentWeekType
+            // 3. 检查星期几
             val dayMatch = course.dayOfWeek == dayOfWeek
-            weekMatch && typeMatch && dayMatch
+            // 4. 【新增】检查排除日期 (如果今天在黑名单里，跳过)
+            val notExcluded = !course.excludedDates.contains(targetDateStr)
+
+            weekMatch && typeMatch && dayMatch && notExcluded
         }.mapNotNull { course ->
             val startNode = timeMap[course.startNode]
             val endNode = timeMap[course.endNode]
 
             if (startNode != null && endNode != null) {
+                // 构造虚拟 ID： course_{CourseID}_{Date}
+                // 用于后续在 UI 层识别这是哪门课的哪一天
+                val virtualId = "course_${course.id}_${targetDateStr}"
+
                 MyEvent(
-                    id = "course_${course.id}_${targetDate}",
+                    id = virtualId,
                     title = course.name,
                     startDate = targetDate,
                     endDate = targetDate,
@@ -74,7 +84,7 @@ object CourseManager {
                     description = "第${course.startNode}-${course.endNode}节",
                     color = course.color,
                     isImportant = false,
-                    eventType = "course"
+                    eventType = "course" // 标记类型为课程
                 )
             } else {
                 null
